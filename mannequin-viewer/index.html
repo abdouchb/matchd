@@ -842,6 +842,14 @@ function setupRetarget(man, anim) {
   rt.aFoot0 = { l: worldPos(ab.foot_l), r: worldPos(ab.foot_r) };
   ANKLE_H = rt.mFoot0.l.y; HIP_HALF = Math.abs(rt.mFoot0.l.x);
   if (bones.ball_l) BALL_LEN = Math.max(6, Math.abs(worldPos(bones.ball_l).z - worldPos(bones.foot_l).z));
+  // Heel / ball ground-contact points in foot-bone space (rest pose, ground at y = 0), used by ?test.
+  rt.contact = {};
+  for (const s of ['l', 'r']) {
+    const f = bones['foot_' + s]; f.updateWorldMatrix(true, false);
+    const fw = worldPos(f), inv = f.matrixWorld.clone().invert();
+    const bw = bones['ball_' + s] ? worldPos(bones['ball_' + s]) : fw.clone().add(V(0, 0, BALL_LEN));
+    rt.contact[s] = [V(fw.x, 0, fw.z - HEEL_BACK).applyMatrix4(inv), V(bw.x, 0, bw.z).applyMatrix4(inv)];
+  }
   LEG_MAX = 0.985 * (worldPos(bones.thigh_l).distanceTo(worldPos(bones.calf_l)) + worldPos(bones.calf_l).distanceTo(worldPos(bones.foot_l)));
   rt.anim = anim; rt.dur = anim.animations[0].duration;
   rt.mixer = new THREE.AnimationMixer(anim);
@@ -2269,6 +2277,8 @@ function runSim() {
   }
   if (params.has('freezeFlash')) { fire(); updateCharacter(0.012); }
   simFrozen = true;
+  // Headless capture hook: advance the frozen sim by N seconds (filmstrips / QA).
+  window.__simStep = sec => { for (let t = 0; t < sec - 1e-9; t += step60) { simTime += step60; updateCharacter(step60); updateFX(step60); } };
   if (params.has('debug')) document.title = 'SIM ' + JSON.stringify({ gq: [V(0, 0, 1).applyQuaternion(gunState.q).toArray().map(x => +x.toFixed(2)), V(0, 1, 0).applyQuaternion(gunState.q).toArray().map(x => +x.toFixed(2))], rl: [RL.on, +RL.t.toFixed(2), RL.env.toFixed(2), RL.err, RL.seg, W.cur.ammo], weapon: W.cur.name, blend: W.blend, score: game.score, hits: game.hits, shots: game.shots, clip: mm.clips[mm.clip].name, v: mm.vel });
 }
 // ?test : scripted locomotion scenarios with foot-contact / popping metrics written into the page title.
@@ -2283,13 +2293,36 @@ function runTest() {
   for (const [name, f] of Object.entries(seq)) {
     turnOff.forEach(t => t.fill(0)); Object.assign(mm, { clip: 0, phase: 0, vel: [0, 0], speed: 0, transitions: 0, searchT: 0 }); charYaw = 0; charPos.set(0, 0, 0); lastPlaced.set(0, 0, 0);
     mm.out.set(IDLE); mm.prev.set(IDLE); mm.outVel.fill(0); mm.inertX.fill(0); mm.inertV.fill(0);
-    const T = name === 'stopgo' ? 13 : 6, prev = {}, slide = [], jump = [], minY = [], pel = [];
-    let reach = 0, worst = {};
+    const T = name === 'stopgo' ? 13 : 6, prev = {}, slide = [], jump = [], minY = [], pel = [], prevC = {}, prevK = {}, cslide = [];
+    let reach = 0, worst = {}, cworst = {}, kneeV = 0, pelAcc = 0, pelV = null; const kr = [999, 0];
     for (let t = 0; t < T; t += step60) {
       testInput = { x: 0, z: 0, run: 0, turn: 0, ...f(t) };
       simTime += step60; updateCharacter(step60);
       reach = Math.max(reach, ikState.reachFix);
       pel.push(worldPos(bones.pelvis).y);
+      if (pel.length > 2) {
+        const v = (pel[pel.length - 1] - pel[pel.length - 2]) / step60;
+        if (pelV !== null && t > 0.2) pelAcc = Math.max(pelAcc, Math.abs(v - pelV) / step60);
+        pelV = v;
+      }
+      for (const s of ['l', 'r']) {
+        // Contact slide: heel / ball points that stay on the ground between frames must not move.
+        bones['foot_' + s].updateWorldMatrix(true, false);
+        const cp = rt.contact[s].map(c => c.clone().applyMatrix4(bones['foot_' + s].matrixWorld));
+        if (prevC[s] && t > 1.5) cp.forEach((c, i) => {
+          const q = prevC[s][i];
+          if (c.y < 1.5 && q.y < 1.5) {
+            const v = Math.hypot(c.x - q.x, c.z - q.z) / step60; cslide.push(v);
+            if (v > (cworst.v || 0)) cworst = { v: +v.toFixed(0), t: +t.toFixed(2), s, pt: i ? 'ball' : 'heel', clip: mm.clips[mm.clip].name };
+          }
+        });
+        prevC[s] = cp;
+        // Knee flexion rate (deg/s) to catch knee popping.
+        const th = worldPos(bones['thigh_' + s]), ca = worldPos(bones['calf_' + s]), fo = worldPos(bones['foot_' + s]);
+        const k = ca.clone().sub(th).angleTo(fo.clone().sub(ca)) / DEG;
+        if (prevK[s] !== undefined && t > 0.2) kneeV = Math.max(kneeV, Math.abs(k - prevK[s]) / step60);
+        prevK[s] = k; if (t > 1.5) { kr[0] = Math.min(kr[0], k); kr[1] = Math.max(kr[1], k); }
+      }
       for (const s of ['l', 'r']) {
         const w = worldPos(bones['foot_' + s]);
         if (prev[s]) {
@@ -2300,10 +2333,12 @@ function runTest() {
         minY.push(w.y); prev[s] = w;
       }
     }
-    slide.sort((a, b) => a - b);
+    slide.sort((a, b) => a - b); cslide.sort((a, b) => a - b);
     out[name] = { v: +mm.speed.toFixed(0), n: slide.length, slideMed: +(slide[slide.length >> 1] || 0).toFixed(1), slideP95: +(slide[Math.floor(slide.length * 0.95)] || 0).toFixed(1),
       slideMax: +(slide[slide.length - 1] || 0).toFixed(1), footVyMax: +Math.max(...jump).toFixed(0), minFootY: +Math.min(...minY).toFixed(2),
-      pelvis: [+Math.min(...pel).toFixed(1), +Math.max(...pel).toFixed(1)], reachFixMax: +reach.toFixed(2), trans: mm.transitions, worst };
+      pelvis: [+Math.min(...pel).toFixed(1), +Math.max(...pel).toFixed(1)], reachFixMax: +reach.toFixed(2), trans: mm.transitions, worst,
+      contactP95: +(cslide[Math.floor(cslide.length * 0.95)] || 0).toFixed(1), contactMax: +(cslide[cslide.length - 1] || 0).toFixed(1), cworst,
+      pelvisAccMax: +pelAcc.toFixed(0), kneeVelMax: +kneeV.toFixed(0), kneeFlex: kr.map(x => +x.toFixed(0)) };
   }
   out.ankleH = +ANKLE_H.toFixed(2); out.legMax = +LEG_MAX.toFixed(1); out.hip = +HIP_HALF.toFixed(1); out.db = mm.db.n;
   document.title = 'TEST ' + JSON.stringify(out);
