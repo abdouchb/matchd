@@ -842,6 +842,14 @@ function setupRetarget(man, anim) {
   rt.aFoot0 = { l: worldPos(ab.foot_l), r: worldPos(ab.foot_r) };
   ANKLE_H = rt.mFoot0.l.y; HIP_HALF = Math.abs(rt.mFoot0.l.x);
   if (bones.ball_l) BALL_LEN = Math.max(6, Math.abs(worldPos(bones.ball_l).z - worldPos(bones.foot_l).z));
+  // Heel / ball ground-contact points in foot-bone space (rest pose, ground at y = 0), used by ?test.
+  rt.contact = {};
+  for (const s of ['l', 'r']) {
+    const f = bones['foot_' + s]; f.updateWorldMatrix(true, false);
+    const fw = worldPos(f), inv = f.matrixWorld.clone().invert();
+    const bw = bones['ball_' + s] ? worldPos(bones['ball_' + s]) : fw.clone().add(V(0, 0, BALL_LEN));
+    rt.contact[s] = [V(fw.x, 0, fw.z - HEEL_BACK).applyMatrix4(inv), V(bw.x, 0, bw.z).applyMatrix4(inv)];
+  }
   LEG_MAX = 0.985 * (worldPos(bones.thigh_l).distanceTo(worldPos(bones.calf_l)) + worldPos(bones.calf_l).distanceTo(worldPos(bones.foot_l)));
   rt.anim = anim; rt.dur = anim.animations[0].duration;
   rt.mixer = new THREE.AnimationMixer(anim);
@@ -874,6 +882,9 @@ function retargetFrame(t, pose) {
       const f = V(0, 0, 1).applyQuaternion(_xq.copy(_aq).multiply(restWorldQ.pelvis.clone().invert()));
       _aq.premultiply(_rollQ.setFromAxisAngle(V(0, 1, 0), -Math.atan2(f.x, f.z) * walkW + (pose ? pose[15] : 0) * DEG));
     }
+    // Lower spine follows part of the hip swing; the chest, arms and weapon stay on the aim line.
+    else if (pose && (e.m === bones.spine_01 || e.m === bones.spine_02))
+      _aq.premultiply(_rollQ.setFromAxisAngle(V(0, 1, 0), pose[15] * (e.m === bones.spine_01 ? 0.5 : 0.2) * DEG));
     setWorldQuat(e.m, _aq);
   }
   solveLegs(pose);
@@ -964,7 +975,7 @@ function gaitParams(v, lat = 0) {
   // Stride frequency (cycles/s, 2 steps each): ~1.7-2.0 steps/s walking, ~2.9 steps/s running.
   // Sideways travel steps faster with shorter strides.
   // Sideways: quicker, shorter side-steps (more so when fast) instead of a frantic forward cadence.
-  const freq = (v < 130 ? 0.72 + 0.26 * v / 130 : 0.98 + 0.47 * Math.min(1, (v - 130) / 270)) * (1 + lat * (0.3 + 0.45 * clamp((v - 90) / 100, 0, 1)));
+  const freq = (v < 130 ? 0.78 + 0.3 * v / 130 : 1.08 + 0.37 * Math.min(1, (v - 130) / 270)) * (1 + lat * (0.55 + 0.45 * clamp((v - 90) / 100, 0, 1)));
   const duty = 0.62 - 0.32 * rf;                                          // stance fraction (run has a flight phase)
   return { rf, freq, duty, S: v * duty / freq };                          // S = ground travel during stance
 }
@@ -975,44 +986,89 @@ function footRoll(pitch) {
   return pitch >= 0 ? [BALL_LEN * sn + ANKLE_H * c, BALL_LEN * (1 - c) + ANKLE_H * sn]
                     : [HEEL_BACK * sn + ANKLE_H * c, HEEL_BACK * (c - 1) - ANKLE_H * sn];
 }
+// Side outputs of the last gaitPose call, per foot: in contact phase?, heel/ball roll z-shift of the ankle.
+const gaitAux = { st: [1, 1], shift: [0, 0] };
+let HIP0 = { y: 80, x: 9, cx: 0, z: 0 };   // hip joints in the idle pose (captureIdle)
+const smin = (a, b, k) => { const h = Math.max(k - Math.abs(a - b), 0) / k; return Math.min(a, b) - h * h * k / 4; };
 function gaitPose(vx, vz, phase) {
   const v = Math.hypot(vx, vz);
-  if (v < 1) return IDLE.slice();
-  const dx = vx / v, dz = vz / v, { rf, duty, S } = gaitParams(v, Math.abs(dx));
-  const p = new Array(NP).fill(0), vf = Math.min(1, v / 90);
-  const ph0 = rf * duty / 2;                                              // run: hips lowest at mid-stance
-  p[0] = lerp(1.6, 0.8, rf) * Math.sin(2 * Math.PI * phase) * vf * (1 - 0.6 * Math.abs(dx));   // weight shift toward the stance foot
-  p[1] = (STANCE.drop - lerp(8, 9.5, rf)) - lerp(1.8, 4.5, rf) * vf * Math.cos(4 * Math.PI * (phase - ph0));
-  p[3] = 2.5 * (1 - 0.4 * rf) * Math.sin(2 * Math.PI * phase) * vf;
-  p[4] = lerp(1.5 * sstep(0, 130, v), 9, rf);
-  p[15] = -lerp(6, 4, rf) * vf * Math.cos(2 * Math.PI * phase) * (1 - Math.abs(dx));   // hip leads the swinging leg
-  // Heel strike -> foot flat -> heel-off -> toe-off; running lands mid-foot and rolls off sooner.
-  const heelA = lerp(-16, -6, rf), toeA = lerp(32, 38, rf), H = lerp(8, 30, rf) * Math.min(1, 0.4 + v / 150) + 7 * Math.abs(dx);
-  // Side-steps never cross the legs: widen the base with the stride so the closing foot stops ~16 cm short
-  // of the stance foot (step-close), instead of swinging through it.
-  const ax = Math.abs(dx), halfW = GAIT_HIP + ax * Math.max(3, (0.62 * S + 16) / 2 - GAIT_HIP);
-  const flatAt = lerp(0.2, 0.12, rf), heelOff = lerp(0.55, 0.4, rf);
-  for (const [o, s] of [[5, 'l'], [10, 'r']]) {
-    const ph = (((phase + (s === 'l' ? 0 : 0.5)) % 1) + 1) % 1;
-    let along, lift = 0, pitch;
+  if (v < 1) { gaitAux.st[0] = gaitAux.st[1] = 1; gaitAux.shift[0] = gaitAux.shift[1] = 0; return IDLE.slice(); }
+  const dx = vx / v, dz = vz / v, ax = Math.abs(dx), { rf, duty, S } = gaitParams(v, ax);
+  const p = new Array(NP).fill(0), vf = Math.min(1, v / 90), TAU = 2 * Math.PI;
+  const ph0 = rf * duty / 2;                                              // walk: hips lowest at heel strike; run: at mid-stance
+  // Pelvis: weight shift over the stance foot, swing-side hip drop, hip yaw leading the swing leg.
+  const hips = ph => [lerp(2.2, 0.8, rf) * Math.sin(TAU * ph) * vf * (1 - 0.6 * ax),
+    lerp(3, 1.5, rf) * Math.sin(TAU * ph) * vf * (1 - 0.3 * ax), -lerp(6, 4, rf) * vf * Math.cos(TAU * ph) * (1 - ax)];
+  // Heel strike -> foot flat -> heel-off -> toe-off; running lands mid-foot under the body and rolls off sooner.
+  const heelA = lerp(-16, -6, rf), toeA = lerp(32, 38, rf), H = lerp(8, 26, rf) * Math.min(1, 0.4 + v / 150) + 5 * ax;
+  const fa = lerp(0.42, 0.3, rf);                                         // share of the stance travel in front of the hip
+  // Side-steps never cross the legs: the base widens so the closing foot stops ~14 cm short of the stance foot.
+  const halfW = GAIT_HIP + ax * Math.max(3, (14 + S / (2 * duty)) / 2 - GAIT_HIP);
+  const flatAt = lerp(0.2, 0.12, rf), heelOff = lerp(0.55, 0.4, rf), early = lerp(0.15, 0.5, rf);
+  const m = -(1 - duty) / duty;                                           // stance ground speed in swing-time units
+  function foot(k, phase) {
+    const ph = (((phase + (k ? 0.5 : 0)) % 1) + 1) % 1;
+    let along, lift = 0, pitch, wc = 1;
     if (ph < duty) {
       const u = ph / duty;
-      along = lerp(0.42, -0.58, u) * S;
+      along = lerp(fa, fa - 1, u) * S;
       pitch = u < flatAt ? lerp(heelA, 0, ease(u / flatAt)) : u < heelOff ? 0 : toeA * ease((u - heelOff) / (1 - heelOff));
     } else {
-      const w = (ph - duty) / (1 - duty);
-      // Backward kick at both ends: the foot keeps its backward ground speed at toe-off and
-      // lands already moving back relative to the body (no skid on touchdown).
-      // Running: the heel kicks up behind first (knee folds), then the shin swings through.
-      const prog = lerp(ease(w), Math.pow(ease(w), 1.6), rf);
-      along = lerp(-0.58, 0.42, prog - 0.6 * (1 - duty) / (2 * Math.PI * duty) * Math.sin(2 * Math.PI * w)) * S;
-      lift = H * Math.sin(Math.PI * Math.pow(w, lerp(0.8, 0.55, rf)));
-      pitch = lerp(toeA, heelA, ease(w)) + rf * 35 * Math.sin(Math.PI * Math.min(1, w * 1.6));
+      const w = (ph - duty) / (1 - duty), wq = w + early * w * (1 - w);   // run: foot rises early (finite slope, no snap)
+      wc = 1 - sstep(0, 0.3, Math.min(w, 1 - w));                         // weight in the hip reach limit
+      // Hermite swing: leaves the ground at ground speed (keeps travelling back/up behind the body when running)
+      // and is retracted before touchdown, so the foot meets the ground with ~zero world velocity.
+      const w2 = w * w, w3 = w2 * w;
+      along = ((2 * w3 - 3 * w2 + 1) * (fa - 1) + (w3 - 2 * w2 + w) * m + (3 * w2 - 2 * w3) * fa + (w3 - w2) * m * lerp(1, 0.8, rf)) * S;
+      lift = H * Math.sin(Math.PI * wq);
+      // Running: the heel folds up behind (knee flexes), then the shin swings through.
+      pitch = lerp(toeA, heelA, ease(w)) + rf * 35 * Math.sin(Math.PI * wq) ** 2;
     }
     pitch *= dz;                                   // backwards: toe first; sideways: flat steps
-    const [ay, shift] = footRoll(pitch), side = s === 'l' ? 1 : -1;
-    p[o] = side * halfW + dx * along; p[o + 1] = ay + lift; p[o + 2] = dz * along + shift;
-    p[o + 3] = pitch; p[o + 4] = side * 4;
+    const [ay, shift] = footRoll(pitch), side = k ? -1 : 1;
+    return { x: side * halfW + dx * along, y: ay + lift, z: dz * along + shift, pitch, yaw: side * 4, st: ph < duty ? 1 : 0, shift, wc };
+  }
+  // Highest hip height (joint centre) that keeps every loaded leg within reach.
+  const Lr = LEG_MAX * 0.995;
+  function reach(ph, f, hp) {
+    let lim = Infinity;
+    const sr = Math.sin(hp[1] * DEG), sy = Math.sin(hp[2] * DEG);
+    for (let k = 0; k < 2; k++) {
+      const side = k ? -1 : 1, hx = HIP0.cx + side * HIP0.x + hp[0], hz = HIP0.z - side * HIP0.x * sy;
+      const dh = Math.hypot(f[k].x - hx, f[k].z - hz), a = f[k].y + Math.sqrt(Math.max(0, Lr * Lr - dh * dh)) - side * HIP0.x * sr;
+      lim = Math.min(lim, a + 30 * (1 - f[k].wc));                       // unloaded legs relax the limit
+    }
+    return lim;
+  }
+  const f = [foot(0, phase), foot(1, phase)], hp = hips(phase);
+  // Vertical: smooth 2-per-cycle sinusoid. Its height and amplitude are solved so that the legs reach the ground at
+  // each foot strike (no compass-gait drop or IK pop): near-straight stance leg at the top of the cycle (walk ~25°
+  // knee flex, run ~50° at max compression).
+  const Lf = LEG_MAX / 0.985, bob = (ph) => 1 + Math.cos(2 * TAU * (ph - ph0));
+  let top = lerp(HIP0.y, ANKLE_H + Lf * lerp(0.972, 0.962, rf), sstep(0, 110, v)), A = lerp(0.8, 2, rf) * vf;
+  for (const ph of [0, 0.5]) {
+    const lim = reach(ph, [foot(0, ph), foot(1, ph)], hips(ph)) - 0.3, b = bob(ph);
+    if (top - A * b > lim) {
+      const Amax = lerp(2, 3, rf) * vf;
+      A = Math.min(Amax, (top - lim) / Math.max(b, 0.2));
+      if (top - A * b > lim) top = lim + A * b;
+    }
+  }
+  let hy = top - A * bob(phase);
+  hy = smin(hy, reach(phase, f, hp), 6);                                  // safety for unusual blends
+  p[0] = hp[0]; p[1] = hy - HIP0.y; p[3] = hp[1]; p[15] = hp[2];
+  // Lean from the ankles grows with speed; the trunk flexes a little more on each run impact.
+  p[4] = lerp(1.5 * sstep(0, 130, v), 8, rf) + rf * vf * 1.2 * Math.cos(2 * TAU * (phase - ph0));
+  for (const [o, k] of [[5, 0], [10, 1]]) {
+    const q = f[k], side = k ? -1 : 1;
+    // Swing feet adapt to the hips: a trailing foot out of reach is drawn in toward the hip.
+    if (q.wc < 1) {
+      const sy = Math.sin(hp[2] * DEG), sr = Math.sin(hp[1] * DEG);
+      const d = V(q.x - (HIP0.cx + side * HIP0.x + hp[0]), q.y - (hy + side * HIP0.x * sr), q.z - (HIP0.z - side * HIP0.x * sy)), l = d.length();
+      if (l > Lr) { d.multiplyScalar(Lr / l - 1); q.x += d.x; q.y += d.y; q.z += d.z; }
+    }
+    p[o] = q.x; p[o + 1] = q.y; p[o + 2] = q.z; p[o + 3] = q.pitch; p[o + 4] = q.yaw;
+    gaitAux.st[k] = q.st; gaitAux.shift[k] = q.shift;
   }
   return p;
 }
@@ -1023,6 +1079,8 @@ function captureIdle(aimPose) {
   for (const s of ['l', 'r'])
     STANCE.foot[s].copy(worldPos(pb['foot_' + s]).sub(rt.aFoot0[s]).multiplyScalar(rt.ratio));
   retargetFrame(ANIM_T0, null);
+  const tl = worldPos(bones.thigh_l), tr = worldPos(bones.thigh_r);
+  HIP0 = { y: (tl.y + tr.y) / 2, x: Math.abs(tl.x - tr.x) / 2, cx: (tl.x + tr.x) / 2, z: (tl.z + tr.z) / 2 };
   const p = new Array(NP).fill(0);
   for (const [o, s] of [[5, 'l'], [10, 'r']]) {
     const f = bones['foot_' + s], w = worldPos(f);
@@ -1044,9 +1102,16 @@ function captureIdle(aimPose) {
 const WALK_SPEED = 140, RUN_SPEED = 400, MM_SWITCH_MARGIN = 0.08, INERT_W = 16;
 const FW = [0.5, 0.5, 0.5, 0.5, 0.4, 0.4, 0.4, 0.4, 3, 3, 1.5, 1.5, 1.5, 1.5, 1, 1];
 const mm = { clips: [], db: null, clip: 0, phase: 0, rate: 1, vel: [0, 0], speed: 0, out: null, prev: null, outVel: new Float32Array(NP),
-  inertX: new Float32Array(NP), inertV: new Float32Array(NP), searchT: 0, cost: 0, best: 0, transitions: 0, demoT: 0 };
+  inertX: new Float32Array(NP), inertV: new Float32Array(NP), lockOff: new Float32Array(NP), searchT: 0, cost: 0, best: 0, transitions: 0, demoT: 0 };
 const charPos = V(0, 0, 0), charVelW = V(0, 0, 0);
-const turnOff = [[0, 0], [0, 0]];   // keeps planted feet fixed in the world while the body turns
+// Foot locking: a foot in its contact phase is pinned to the world (only its heel/ball roll moves the ankle), which
+// absorbs inertialization offsets, speed/direction mismatch and turning. On lift-off the residual correction eases
+// out during the swing. When stopped, leftover offsets are resolved with small settle steps, one foot at a time.
+const footLock = [0, 1].map(() => ({}));
+const LOCK_MAX = 24;
+let settleT = 0;
+function resetFootLocks() { footLock.forEach(L => Object.assign(L, { on: false, ax: 0, az: 0, ayaw: 0, c: [0, 0, 0], c0: [0, 0, 0], sw: 1, step: false, req: false, lift: 0 })); settleT = 0; }
+resetFootLocks();
 let charYaw = 0;
 const toWorld = p => p.clone().applyAxisAngle(V(0, 1, 0), charYaw).add(charPos);
 const toWorldDir = d => d.clone().applyAxisAngle(V(0, 1, 0), charYaw);
@@ -1101,7 +1166,7 @@ function mmTransition(i) {
   const base = gaitPose(clip.vx, clip.vz, np);
   const adv = clip.v > 1 ? clip.freq * clipSpeedRate(clip, mm.speed) * 0.01 : 0;
   const base2 = gaitPose(clip.vx, clip.vz, (np + adv) % 1);
-  for (let j = 0; j < NP; j++) { mm.inertX[j] = mm.out[j] - base[j]; mm.inertV[j] = mm.outVel[j] - (base2[j] - base[j]) / 0.01; }
+  for (let j = 0; j < NP; j++) { mm.inertX[j] = mm.out[j] - mm.lockOff[j] - base[j]; mm.inertV[j] = mm.outVel[j] - (base2[j] - base[j]) / 0.01; }
   mm.clip = nc; mm.phase = np; mm.transitions++;
 }
 
@@ -1158,19 +1223,46 @@ function stepLocomotion(dt) {
   }
   const base = gaitPose(clip.vx, clip.vz, mm.phase);
   for (let i = 0; i < NP; i++) mm.out[i] = base[i] + mm.inertX[i];
-  [5, 10].forEach((o, k) => {
-    const to = turnOff[k], planted = mm.out[o + 1] < ANKLE_H + 1.2 && Math.hypot(to[0], to[1]) < 22;
-    if (planted && Math.abs(dTurn) > 1e-6) {
-      const px = mm.out[o] + to[0], pz = mm.out[o + 2] + to[1], c = Math.cos(dTurn), sn = Math.sin(dTurn);
-      to[0] += (px * c - pz * sn) - px; to[1] += (px * sn + pz * c) - pz;
-    } else if (!planted) { const d = Math.exp(-10 * dt); to[0] *= d; to[1] *= d; }
-    mm.out[o] += to[0]; mm.out[o + 2] += to[1];
-  });
-  for (const o of [5, 10]) mm.out[o + 1] += Math.min(7, 0.22 * Math.hypot(mm.inertX[o], mm.inertX[o + 2]));   // step, don't skate
+  stepFootLocks(dt, clip);
   if (dt > 1e-5) for (let i = 0; i < NP; i++) {
     mm.outVel[i] += ((mm.out[i] - mm.prev[i]) / dt - mm.outVel[i]) * Math.min(1, dt * 25);
     mm.prev[i] = mm.out[i];
   }
+}
+
+function stepFootLocks(dt, clip) {
+  const idle = clip.v <= 1, c = Math.cos(charYaw), sn = Math.sin(charYaw);
+  const swingT = idle ? 0.3 : Math.max(0.12, 0.75 * (1 - gaitParams(clip.v, Math.abs(clip.vx) / clip.v).duty) / (clip.freq * mm.rate));
+  // Settle steps once standing still: move the foot furthest from the idle stance first.
+  if (idle && mm.speed < 3 && footLock.every(L => L.on)) {
+    settleT += dt;
+    const m = footLock.map(L => Math.hypot(L.c[0], L.c[1]) + 0.3 * Math.abs(L.c[2])), k = m[1] > m[0] ? 1 : 0;
+    if (settleT > 0.15 && m[k] > 3.5) { footLock[k].req = true; settleT = 0; }
+  } else settleT = 0;
+  mm.lockOff.fill(0);
+  footLock.forEach((L, k) => {
+    const o = k ? 10 : 5, contact = gaitAux.st[k] === 1, sh = gaitAux.shift[k], out = mm.out;
+    if (L.on) {
+      const dx = L.ax - charPos.x, dz = L.az - charPos.z;
+      const cc = [dx * c - dz * sn - out[o], dx * sn + dz * c + sh - out[o + 2], angWrap((L.ayaw - charYaw) - out[o + 4] * DEG) / DEG];
+      const far = Math.hypot(cc[0], cc[1]) > LOCK_MAX || Math.abs(cc[2]) > 35;
+      if (!contact || far || L.req) {
+        L.on = false; L.c0 = cc; L.c = cc; L.sw = 0; L.step = far || L.req;
+        L.lift = L.step ? clamp(0.3 * Math.hypot(cc[0], cc[1]) + 0.05 * Math.abs(cc[2]), 2.5, 8) : 0; L.req = false;
+      } else L.c = cc;
+    } else {
+      L.sw = Math.min(1, L.sw + dt / swingT);
+      const e = 1 - ease(L.sw); L.c = L.c0.map(x => x * e);
+      if (contact && (!L.step || L.sw >= 1)) {
+        const x = out[o] + L.c[0], z = out[o + 2] + L.c[1] - sh;
+        L.ax = charPos.x + x * c + z * sn; L.az = charPos.z - x * sn + z * c;
+        L.ayaw = charYaw + (out[o + 4] + L.c[2]) * DEG; L.on = true; L.step = false; L.lift = 0;
+      }
+    }
+    const lift = L.on ? 0 : L.lift * Math.sin(Math.PI * L.sw) + Math.min(7, 0.22 * Math.hypot(mm.inertX[o], mm.inertX[o + 2]));
+    mm.lockOff[o] = L.c[0]; mm.lockOff[o + 2] = L.c[1]; mm.lockOff[o + 4] = L.c[2]; mm.lockOff[o + 1] = lift;
+    out[o] += L.c[0]; out[o + 2] += L.c[1]; out[o + 4] += L.c[2]; out[o + 1] += lift;
+  });
 }
 
 // Fit the pistol into the animated right-hand grip (gun-space GRIP_R), then push it out of the palm.
@@ -2079,7 +2171,7 @@ function enterGame() {
   game.active = true; game.state = 'ready';
   document.body.classList.add('gaming'); document.getElementById('hud').classList.remove('hidden');
   TGROUP.visible = true; controls.enabled = false; controls.autoRotate = false; demoOn = false;
-  charPos.set(0, 0, 0); charYaw = 0; lastPlaced.set(0, 0, 0); tps.yaw = 0; tps.pitch = -0.04;
+  charPos.set(0, 0, 0); charYaw = 0; lastPlaced.set(0, 0, 0); resetFootLocks(); tps.yaw = 0; tps.pitch = -0.04;
   scene.fog.near = 2500; scene.fog.far = 9000;
   showOverlay('Aim trainer', '60 seconds. Hit the steel plates and knock down the poppers.\nFarther plates score more, popper headshots +50.\n' +
     (IS_TOUCH ? 'Left thumb: move (push to the edge to run) · Right thumb: aim\nFIRE (hold = rifle full-auto) · AIM zoom · R reload · ⇄ weapon'
@@ -2269,6 +2361,8 @@ function runSim() {
   }
   if (params.has('freezeFlash')) { fire(); updateCharacter(0.012); }
   simFrozen = true;
+  // Headless capture hook: advance the frozen sim by N seconds (filmstrips / QA).
+  window.__simStep = sec => { for (let t = 0; t < sec - 1e-9; t += step60) { simTime += step60; updateCharacter(step60); updateFX(step60); } };
   if (params.has('debug')) document.title = 'SIM ' + JSON.stringify({ gq: [V(0, 0, 1).applyQuaternion(gunState.q).toArray().map(x => +x.toFixed(2)), V(0, 1, 0).applyQuaternion(gunState.q).toArray().map(x => +x.toFixed(2))], rl: [RL.on, +RL.t.toFixed(2), RL.env.toFixed(2), RL.err, RL.seg, W.cur.ammo], weapon: W.cur.name, blend: W.blend, score: game.score, hits: game.hits, shots: game.shots, clip: mm.clips[mm.clip].name, v: mm.vel });
 }
 // ?test : scripted locomotion scenarios with foot-contact / popping metrics written into the page title.
@@ -2279,17 +2373,43 @@ function runTest() {
     circle: t => ({ x: 0, z: 1, run: 1, turn: 0.7 }),
     stopgo: t => t < 1 ? {} : t < 4 ? { z: 1 } : t < 6 ? {} : t < 9 ? { z: 1, run: 1 } : t < 11 ? {} : { z: 1 },
   };
-  const out = {};
+  const out = {}, trace = [];
   for (const [name, f] of Object.entries(seq)) {
-    turnOff.forEach(t => t.fill(0)); Object.assign(mm, { clip: 0, phase: 0, vel: [0, 0], speed: 0, transitions: 0, searchT: 0 }); charYaw = 0; charPos.set(0, 0, 0); lastPlaced.set(0, 0, 0);
+    resetFootLocks(); Object.assign(mm, { clip: 0, phase: 0, vel: [0, 0], speed: 0, transitions: 0, searchT: 0 }); charYaw = 0; charPos.set(0, 0, 0); lastPlaced.set(0, 0, 0);
     mm.out.set(IDLE); mm.prev.set(IDLE); mm.outVel.fill(0); mm.inertX.fill(0); mm.inertV.fill(0);
-    const T = name === 'stopgo' ? 13 : 6, prev = {}, slide = [], jump = [], minY = [], pel = [];
-    let reach = 0, worst = {};
+    const T = name === 'stopgo' ? 13 : 6, prev = {}, slide = [], jump = [], minY = [], pel = [], prevC = {}, prevK = {}, cslide = [];
+    let reach = 0, worst = {}, cworst = {}, kneeV = 0, pelAcc = 0, pelV = null; const kr = [999, 0], pelS = [];
     for (let t = 0; t < T; t += step60) {
       testInput = { x: 0, z: 0, run: 0, turn: 0, ...f(t) };
       simTime += step60; updateCharacter(step60);
       reach = Math.max(reach, ikState.reachFix);
-      pel.push(worldPos(bones.pelvis).y);
+      pel.push(worldPos(bones.pelvis).y); if (t > 1.5) pelS.push(pel[pel.length - 1]);
+      if (pel.length > 2) {
+        const v = (pel[pel.length - 1] - pel[pel.length - 2]) / step60;
+        if (pelV !== null && t > 0.2) pelAcc = Math.max(pelAcc, Math.abs(v - pelV) / step60);
+        pelV = v;
+      }
+      for (const s of ['l', 'r']) {
+        // Contact slide: heel / ball points that stay on the ground between frames must not move.
+        bones['foot_' + s].updateWorldMatrix(true, false);
+        const cp = rt.contact[s].map(c => c.clone().applyMatrix4(bones['foot_' + s].matrixWorld));
+        if (prevC[s] && t > 1.5) cp.forEach((c, i) => {
+          const q = prevC[s][i];
+          if (c.y < 0.6 && q.y < 0.6) {
+            const v = Math.hypot(c.x - q.x, c.z - q.z) / step60; cslide.push(v);
+            if (v > (cworst.v || 0)) cworst = { v: +v.toFixed(0), t: +t.toFixed(2), s, pt: i ? 'ball' : 'heel', clip: mm.clips[mm.clip].name };
+          }
+        });
+        if (params.get('trace') === name && s === params.get('foot') && Math.abs(t - +params.get('at')) < 0.2)
+          trace.push([+t.toFixed(3), mm.clips[mm.clip].name, +mm.phase.toFixed(3), footLock[s === 'l' ? 0 : 1].on ? 1 : 0, gaitAux.st[s === 'l' ? 0 : 1],
+            ...cp.map(c => +c.y.toFixed(1)), ...(prevC[s] ? cp.map((c, i) => +(Math.hypot(c.x - prevC[s][i].x, c.z - prevC[s][i].z) / step60).toFixed(0)) : []), +worldPos(bones.pelvis).y.toFixed(2), +ikState.reachFix.toFixed(2)]);
+        prevC[s] = cp;
+        // Knee flexion rate (deg/s) to catch knee popping.
+        const th = worldPos(bones['thigh_' + s]), ca = worldPos(bones['calf_' + s]), fo = worldPos(bones['foot_' + s]);
+        const k = ca.clone().sub(th).angleTo(fo.clone().sub(ca)) / DEG;
+        if (prevK[s] !== undefined && t > 0.2) kneeV = Math.max(kneeV, Math.abs(k - prevK[s]) / step60);
+        prevK[s] = k; if (t > 1.5) { kr[0] = Math.min(kr[0], k); kr[1] = Math.max(kr[1], k); }
+      }
       for (const s of ['l', 'r']) {
         const w = worldPos(bones['foot_' + s]);
         if (prev[s]) {
@@ -2300,12 +2420,15 @@ function runTest() {
         minY.push(w.y); prev[s] = w;
       }
     }
-    slide.sort((a, b) => a - b);
+    slide.sort((a, b) => a - b); cslide.sort((a, b) => a - b);
     out[name] = { v: +mm.speed.toFixed(0), n: slide.length, slideMed: +(slide[slide.length >> 1] || 0).toFixed(1), slideP95: +(slide[Math.floor(slide.length * 0.95)] || 0).toFixed(1),
       slideMax: +(slide[slide.length - 1] || 0).toFixed(1), footVyMax: +Math.max(...jump).toFixed(0), minFootY: +Math.min(...minY).toFixed(2),
-      pelvis: [+Math.min(...pel).toFixed(1), +Math.max(...pel).toFixed(1)], reachFixMax: +reach.toFixed(2), trans: mm.transitions, worst };
+      pelvis: [+Math.min(...pelS).toFixed(1), +Math.max(...pelS).toFixed(1)], reachFixMax: +reach.toFixed(2), trans: mm.transitions, worst,
+      contactP95: +(cslide[Math.floor(cslide.length * 0.95)] || 0).toFixed(1), contactMax: +(cslide[cslide.length - 1] || 0).toFixed(1), cworst,
+      pelvisAccMax: +pelAcc.toFixed(0), kneeVelMax: +kneeV.toFixed(0), kneeFlex: kr.map(x => +x.toFixed(0)) };
   }
   out.ankleH = +ANKLE_H.toFixed(2); out.legMax = +LEG_MAX.toFixed(1); out.hip = +HIP_HALF.toFixed(1); out.db = mm.db.n;
+  if (trace.length) out.trace = trace;
   document.title = 'TEST ' + JSON.stringify(out);
 }
 renderer.setAnimationLoop(() => {
