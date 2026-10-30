@@ -9,5 +9,8 @@ Internet is needed on first load (three.js is loaded from unpkg.com).
 
 Controls: WASD move · Shift run · Q/E turn · Space fire · 1/2 pistol/rifle · R reload
           Edit IK (drag handles, T move / R rotate) · Aim game: mouse aim, LMB fire, RMB zoom, Esc pause
+Locomotion QA: http://localhost:8000/?test  runs scripted walk/run/strafe/back/circle/stop-go scenarios and writes
+          contact-slide, pelvis-acceleration, knee-velocity and reach metrics into the page title
+          (&trace=walk&foot=l&at=3.0 adds a per-frame trace around that time).
 Files: index.html (all code) · model/Mannequin.FBX · anim/*.FBX (pose sources) · assets/reference.jpg
 تشغيل: شغّل start-windows.bat ثم افتح http://localhost:8000
