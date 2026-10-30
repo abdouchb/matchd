@@ -1,0 +1,21 @@
+<script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.186.1/build/three.module.js","three/addons/":"https://unpkg.com/three@0.186.1/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+const out = {};
+for (const f of ['model/Mannequin.FBX', 'model/Player_kachabia.fbx']) {
+  const o = await new FBXLoader().loadAsync(f); o.updateMatrixWorld(true);
+  const box = new THREE.Box3(), v = new THREE.Vector3(); let head;
+  o.traverse(n => {
+    if (n.isBone && n.name === 'head' && !head) head = n.getWorldPosition(new THREE.Vector3());
+    if (!n.isSkinnedMesh) return;
+    const si = n.geometry.attributes.skinIndex, sw = n.geometry.attributes.skinWeight, P = n.geometry.attributes.position;
+    for (let i = 0; i < P.count; i++) {
+      let best = 0, bi = -1; for (let k = 0; k < 4; k++) if (sw.getComponent(i, k) > best) { best = sw.getComponent(i, k); bi = si.getComponent(i, k); }
+      if (n.skeleton.bones[bi]?.name === 'head') { v.fromBufferAttribute(P, i).applyMatrix4(n.matrixWorld); box.expandByPoint(v); }
+    }
+  });
+  out[f] = { head: head.toArray().map(x => +x.toFixed(1)), headVerts: [box.min.toArray().map(x => +x.toFixed(1)), box.max.toArray().map(x => +x.toFixed(1))] };
+}
+document.title = 'PROBE ' + JSON.stringify(out);
+</script>
