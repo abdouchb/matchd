@@ -22,6 +22,7 @@
 #include "gui/graphics.h"
 #include "gui/layer.h"
 #include "gui/wallpaper.h"
+#include "gui/new_app_icons.h"
 #include "desktop/cursor.h"
 #include "gui/bitmap_icons.h"
 #include "zarqaa/string.h"
@@ -93,9 +94,14 @@ static struct hud_button left_buttons[] = {
     {icon_menu_devices,     ICON_MENU_SIZE, ICON_MENU_SIZE, "Devices",      "Hardware & PCI",   APP_DEVICE_MANAGER,0,0,0,0,false},
     {icon_menu_benchmark,   ICON_MENU_SIZE, ICON_MENU_SIZE, "Benchmark",    "Physics Engine",   APP_BENCHMARK,     0,0,0,0,false},
     {icon_menu_snake,       ICON_MENU_SIZE, ICON_MENU_SIZE, "Snake Game",   "Ring 3 Game",      APP_SNAKE,         0,0,0,0,false},
+    {new_icon_menu[NEWICON_CLOCK],    ICON_MENU_SIZE, ICON_MENU_SIZE, "Clock",       "Time & Timer",     APP_CLOCK,         0,0,0,0,false},
+    {new_icon_menu[NEWICON_CALENDAR], ICON_MENU_SIZE, ICON_MENU_SIZE, "Calendar",    "Month View",       APP_CALENDAR,      0,0,0,0,false},
+    {new_icon_menu[NEWICON_SYSINFO],  ICON_MENU_SIZE, ICON_MENU_SIZE, "About",       "System Info",      APP_SYSINFO,       0,0,0,0,false},
+    {new_icon_menu[NEWICON_2048],     ICON_MENU_SIZE, ICON_MENU_SIZE, "2048",        "Puzzle Game",      APP_GAME2048,      0,0,0,0,false},
+    {new_icon_menu[NEWICON_MINES],    ICON_MENU_SIZE, ICON_MENU_SIZE, "Minesweeper", "Puzzle Game",      APP_MINESWEEPER,   0,0,0,0,false},
     {icon_menu_power,       ICON_MENU_SIZE, ICON_MENU_SIZE, "Power",        "Shutdown / Reset", APP_POWER,         0,0,0,0,false},
 };
-#define NUM_LEFT 15
+#define NUM_LEFT 20
 
 /* Bottom dock: 7 productivity apps */
 static struct hud_button dock_buttons[] = {
@@ -182,6 +188,7 @@ static bool search_is_selecting = false;
  * ══════════════════════════════════════════════════════════ */
 
 void desktop_init(void) {
+    new_app_icons_init();
     layer_init();
     
     int w = fb_get_width();
@@ -292,6 +299,11 @@ extern struct window *boot_logger_open(void);
 extern struct window *device_manager_open(void);
 extern struct window *image_viewer_open(void);
 extern struct window *benchmark_open(void);
+extern struct window *clock_app_open(void);
+extern struct window *calendar_open(void);
+extern struct window *sysinfo_open(void);
+extern struct window *game2048_open(void);
+extern struct window *minesweeper_open(void);
         case APP_TERMINAL:     title = "Terminal";     open_func = terminal_open;     break;
         case APP_FILE_MANAGER: title = "File Manager"; open_func = file_manager_open; break;
         case APP_TEXT_EDITOR:  title = "Text Editor";  open_func = text_editor_open;  break;
@@ -309,6 +321,11 @@ extern struct window *benchmark_open(void);
         case APP_DEVICE_MANAGER:title = "Device Manager";open_func = device_manager_open; break;
         case APP_IMAGE_VIEWER: title = "Zarqaa Gallery"; open_func = image_viewer_open; break;
         case APP_BENCHMARK:    title = "Physics Benchmark"; open_func = benchmark_open; break;
+        case APP_CLOCK:        title = "Zarqaa Clock";    open_func = clock_app_open;   break;
+        case APP_CALENDAR:     title = "Zarqaa Calendar"; open_func = calendar_open;    break;
+        case APP_SYSINFO:      title = "About Zarqaa OS"; open_func = sysinfo_open;     break;
+        case APP_GAME2048:     title = "2048";            open_func = game2048_open;    break;
+        case APP_MINESWEEPER:  title = "Minesweeper";     open_func = minesweeper_open; break;
         case APP_SNAKE: {
             title = "Terminal";
             open_func = terminal_open;
@@ -833,6 +850,11 @@ bool desktop_is_app_running(int app_id, bool *out_minimized) {
         case APP_IMAGE_VIEWER: title = "Zarqaa Gallery"; break;
         case APP_BENCHMARK:    title = "Physics Benchmark"; break;
         case APP_SNAKE:        title = "Snake";        break;
+        case APP_CLOCK:        title = "Zarqaa Clock";    break;
+        case APP_CALENDAR:     title = "Zarqaa Calendar"; break;
+        case APP_SYSINFO:      title = "About Zarqaa OS"; break;
+        case APP_GAME2048:     title = "2048";            break;
+        case APP_MINESWEEPER:  title = "Minesweeper";     break;
     }
     if (!title) return false;
     struct window *win = wm_find_window_by_title(title);

@@ -19,6 +19,9 @@
 #include "graphics/render_queue.h"
 #include "graphics/graphics_api.h"
 
+#define ZSR_NUM_APP_CARDS 19
+#define ZSR_APP_CARD_COLS 4
+
 
 extern void fb_swap(void);
 extern void dirty_rect_add(int x, int y, int w, int h);
@@ -1804,22 +1807,26 @@ static void zsr_build_zarqaa_window(
             zsr_emit_text(list, ox, oy, "Installed Applications (Click any card to launch)", 1, content_clip, ZSR_RGBA(255, 255, 255, 240));
             zsr_emit_line(list, ox, oy + 20, ox + frame.width - 48, oy + 20, 1, content_clip, ZSR_RGBA(255, 255, 255, 30));
 
-            static const char *app_names[] = {
-                "Terminal",     "Calculator",   "Notepad+",
-                "File Manager", "Studio Paint", "Browser",
-                "Gallery",      "Task Manager", "Snake Game"
+            static const char *app_names[ZSR_NUM_APP_CARDS] = {
+                "Terminal",     "Calculator",   "Notepad+",     "File Manager",
+                "Studio Paint", "Browser",      "Gallery",      "Task Manager",
+                "Snake Game",   "Python IDE",   "Settings",     "Devices",
+                "Benchmark",    "Boot Log",     "Clock",        "Calendar",
+                "About",        "2048",         "Minesweeper"
             };
-            static const char *app_descs[] = {
-                "CLI & ELF Shell",     "ZUI Math Engine",     "Text Editor",
-                "Disks & Files",       "Drawing & Graphics",  "HTML Web Engine",
-                "Image Viewer",        "Process Monitor",     "Ring-3 ELF Game"
+            static const char *app_descs[ZSR_NUM_APP_CARDS] = {
+                "CLI & ELF Shell",   "ZUI Math Engine",   "Text Editor",     "Disks & Files",
+                "Drawing & Graphics","HTML Web Engine",   "Image Viewer",    "Process Monitor",
+                "Ring-3 ELF Game",   "Mini IDE",          "Preferences",     "Hardware & PCI",
+                "Physics Engine",    "System Logs",       "Time & Timer",    "Month View",
+                "System Info",       "Puzzle Game",       "Puzzle Game"
             };
 
-            int cols = 3;
+            int cols = ZSR_APP_CARD_COLS;
             int card_w = (frame.width - 48 - (cols - 1) * 16) / cols;
             int card_h = 56;
 
-            for (int i = 0; i < 9; i++) {
+            for (int i = 0; i < ZSR_NUM_APP_CARDS; i++) {
                 int col = i % cols;
                 int row = i / cols;
                 int cx = ox + col * (card_w + 16);
@@ -1994,24 +2001,8 @@ static void zsr_draw_mouse_cursor(zsr_surface_t *surface)
    ------------------------------------------------------------ */
 #include "gui/bitmap_icons.h"
 
-// Application IDs (from desktop.c)
-#define APP_TERMINAL       100
-#define APP_FILE_MANAGER   101
-#define APP_TEXT_EDITOR    102
-#define APP_TASK_MANAGER   103
-#define APP_SETTINGS       104
-#define APP_CALCULATOR     105
-#define APP_HTML_VIEWER    106
-#define APP_QUANTUM_VIEWER 107
-#define APP_PYTHON_IDE     108
-#define APP_POWER          109
-#define APP_PAINT          116
-#define APP_DEBUG_CONSOLE  117
-#define APP_BOOT_LOGGER    118
-#define APP_DEVICE_MANAGER 119
-#define APP_IMAGE_VIEWER   120
-#define APP_BENCHMARK      121
-#define APP_SNAKE          122
+#include "desktop/desktop.h"
+#include "gui/new_app_icons.h"
 
 struct zsr_hud_button {
     const uint32_t *bitmap;
@@ -2030,9 +2021,12 @@ static struct zsr_hud_button g_zsr_dock_buttons[] = {
     {icon_dock_notepad,     ICON_DOCK_SIZE, ICON_DOCK_SIZE, "Notepad+",      "Text Editor",         APP_TEXT_EDITOR},
     {icon_dock_calculator,  ICON_DOCK_SIZE, ICON_DOCK_SIZE, "Calculator",    "Math Tool",           APP_CALCULATOR},
     {icon_dock_gallery,     ICON_DOCK_SIZE, ICON_DOCK_SIZE, "Gallery",       "Image Viewer",        APP_IMAGE_VIEWER},
+    {new_icon_dock[NEWICON_CLOCK],   ICON_DOCK_SIZE, ICON_DOCK_SIZE, "Clock",    "Time & Timer",        APP_CLOCK},
+    {new_icon_dock[NEWICON_2048],    ICON_DOCK_SIZE, ICON_DOCK_SIZE, "2048",     "Puzzle Game",         APP_GAME2048},
+    {new_icon_dock[NEWICON_SYSINFO], ICON_DOCK_SIZE, ICON_DOCK_SIZE, "About",    "System Info",         APP_SYSINFO},
     {icon_dock_power,       ICON_DOCK_SIZE, ICON_DOCK_SIZE, "Power",         "Management",          APP_POWER},
 };
-#define ZSR_NUM_DOCK 7
+#define ZSR_NUM_DOCK 10
 
 extern bool desktop_is_app_running(int app_id, bool *out_minimized);
 extern void desktop_launch_app(int app_id);
@@ -2266,6 +2260,7 @@ static void zsr_compositor_init(
 {
     compositor->backbuffer = backbuffer;
 
+    new_app_icons_init();
     zsr_pre_render_wallpaper(backbuffer->width, backbuffer->height);
 
     zsr_window_init(
@@ -2339,10 +2334,27 @@ static void zsr_compositor_render_region(
     zsr_execute_region(surface, &compositor->commands, region);
 }
 
+/* Drive the hosted app's on_tick and turn its redraw requests into damage */
+static void zsr_tick_active_app(zsr_compositor_t *compositor)
+{
+    struct window *win = wm_get_focused();
+    if (!g_window_open || !win || !win->visible || win->minimized) return;
+
+    if (win->on_tick) win->on_tick(win);
+
+    if (win->needs_redraw) {
+        zsr_rect_t frame = compositor->main_window.bounds;
+        zsr_damage_add(&compositor->damage,
+                       zsr_rect_make(frame.x, frame.y + ZSR_TITLEBAR_HEIGHT, win->width, win->height));
+    }
+}
+
 static void zsr_compositor_frame(zsr_compositor_t *compositor)
 {
     zsr_damage_t *damage = &compositor->damage;
     zsr_surface_t *surface = compositor->backbuffer;
+
+    zsr_tick_active_app(compositor);
     
     // Dynamic backbuffer
     surface->pixels = fb_get_backbuffer();
@@ -2517,17 +2529,19 @@ void zsr_handle_mouse_down(
     if ((!focused_win || !focused_win->visible || focused_win->minimized) && g_active_tab_index == 1) {
         int ox = frame.x + 24;
         int oy = frame.y + 100;
-        int cols = 3;
+        int cols = ZSR_APP_CARD_COLS;
         int card_w = (frame.width - 48 - (cols - 1) * 16) / cols;
         int card_h = 56;
 
-        static const int app_ids[] = {
-            APP_TERMINAL,     APP_CALCULATOR,   APP_TEXT_EDITOR,
-            APP_FILE_MANAGER, APP_PAINT,        APP_HTML_VIEWER,
-            APP_IMAGE_VIEWER, APP_TASK_MANAGER, APP_SNAKE
+        static const int app_ids[ZSR_NUM_APP_CARDS] = {
+            APP_TERMINAL,     APP_CALCULATOR,   APP_TEXT_EDITOR,  APP_FILE_MANAGER,
+            APP_PAINT,        APP_HTML_VIEWER,  APP_IMAGE_VIEWER, APP_TASK_MANAGER,
+            APP_SNAKE,        APP_PYTHON_IDE,   APP_SETTINGS,     APP_DEVICE_MANAGER,
+            APP_BENCHMARK,    APP_BOOT_LOGGER,  APP_CLOCK,        APP_CALENDAR,
+            APP_SYSINFO,      APP_GAME2048,     APP_MINESWEEPER
         };
 
-        for (int i = 0; i < 9; i++) {
+        for (int i = 0; i < ZSR_NUM_APP_CARDS; i++) {
             int col = i % cols;
             int row = i / cols;
             int cx = ox + col * (card_w + 16);
@@ -2584,6 +2598,7 @@ void zsr_handle_mouse_down(
         if (app_mx >= 0 && app_mx < frame.width && app_my >= 0 && app_my < frame.height - ZSR_TITLEBAR_HEIGHT) {
             if (active_win->on_mouse) {
                 active_win->on_mouse(active_win, app_mx, app_my, true, false); // left_down = true, right = false for now
+                active_win->needs_redraw = true;
             }
         }
     }

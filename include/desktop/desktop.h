@@ -33,5 +33,10 @@ const char *desktop_get_current_wallpaper(void);
 #define APP_IMAGE_VIEWER 16
 #define APP_BENCHMARK    17
 #define APP_SNAKE        18
+#define APP_CLOCK        19
+#define APP_CALENDAR     20
+#define APP_SYSINFO      21
+#define APP_GAME2048     22
+#define APP_MINESWEEPER  23
 
 #endif /* DESKTOP_H */

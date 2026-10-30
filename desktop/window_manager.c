@@ -176,6 +176,8 @@ void wm_focus_window(struct window *win) {
     dirty_rect_add(win->x - 10, win->y - TITLEBAR_HEIGHT - 10, win->width + 20, win->height + TITLEBAR_HEIGHT + 20);
 }
 
+int wm_get_window_count(void) { return window_count; }
+
 struct window *wm_get_focused(void) {
     if (window_count == 0) return NULL;
     return &windows[z_order[window_count - 1]];

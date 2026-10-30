@@ -1,4 +1,5 @@
 /* Auto-generated Zarqaa OS Icon Bitmaps */
+#include "gui/new_app_icons.h"
 #include "gui/bitmap_icons.h"
 #include "drivers/framebuffer.h"
 #include "desktop/desktop.h"
@@ -4263,6 +4264,11 @@ const uint32_t *icon_get_dock_bitmap(int app_id) {
         case APP_DEVICE_MANAGER:return icon_dock_devices;
         case APP_BENCHMARK:     return icon_dock_benchmark;
         case APP_SNAKE:         return icon_dock_snake;
+        case APP_CLOCK:         return new_icon_dock[NEWICON_CLOCK];
+        case APP_CALENDAR:      return new_icon_dock[NEWICON_CALENDAR];
+        case APP_SYSINFO:       return new_icon_dock[NEWICON_SYSINFO];
+        case APP_GAME2048:      return new_icon_dock[NEWICON_2048];
+        case APP_MINESWEEPER:   return new_icon_dock[NEWICON_MINES];
         case APP_POWER:         return icon_dock_power;
         default:                return NULL;
     }
@@ -4284,6 +4290,11 @@ const uint32_t *icon_get_menu_bitmap(int app_id) {
         case APP_DEVICE_MANAGER:return icon_menu_devices;
         case APP_BENCHMARK:     return icon_menu_benchmark;
         case APP_SNAKE:         return icon_menu_snake;
+        case APP_CLOCK:         return new_icon_menu[NEWICON_CLOCK];
+        case APP_CALENDAR:      return new_icon_menu[NEWICON_CALENDAR];
+        case APP_SYSINFO:       return new_icon_menu[NEWICON_SYSINFO];
+        case APP_GAME2048:      return new_icon_menu[NEWICON_2048];
+        case APP_MINESWEEPER:   return new_icon_menu[NEWICON_MINES];
         case APP_POWER:         return icon_menu_power;
         default:                return NULL;
     }
