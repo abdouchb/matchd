@@ -1,0 +1,18 @@
+<script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.186.1/build/three.module.js","three/addons/":"https://unpkg.com/three@0.186.1/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+const out = {};
+const L = new FBXLoader();
+for (const f of ['model/Mannequin.FBX', 'model/Player_kachabia.fbx']) {
+  const o = await L.loadAsync(f); o.updateMatrixWorld(true);
+  const b = {}; o.traverse(n => { if (n.isBone) b[n.name] = n; });
+  const wp = n => b[n] ? b[n].getWorldPosition(new THREE.Vector3()).toArray().map(x => +x.toFixed(1)) : null;
+  const meshes = []; o.traverse(n => { if (n.isMesh) { const m = [].concat(n.material); meshes.push({ name: n.name, skinned: n.isSkinnedMesh, verts: n.geometry.attributes.position.count, mats: m.map(x => ({ n: x.name, c: x.color?.getHexString(), map: !!x.map, img: x.map?.image ? (x.map.image.width||0) : null, op: x.opacity, tr: x.transparent })) }); } });
+  const box = new THREE.Box3().setFromObject(o);
+  out[f] = { scale: o.scale.toArray(), rot: o.rotation.toArray().slice(0,3).map(x=>+x.toFixed(2)), box: [box.min.toArray().map(x=>+x.toFixed(1)), box.max.toArray().map(x=>+x.toFixed(1))],
+    pelvis: wp('pelvis'), thigh_l: wp('thigh_l'), calf_l: wp('calf_l'), foot_l: wp('foot_l'), ball_l: wp('ball_l'), spine_03: wp('spine_03'), spine_05: wp('spine_05'), neck_01: wp('neck_01'), head: wp('head'),
+    upperarm_l: wp('upperarm_l'), lowerarm_l: wp('lowerarm_l'), hand_l: wp('hand_l'), hand_r: wp('hand_r'), middle_01_r: wp('middle_01_r'), meshes, anims: o.animations.length };
+}
+document.title = 'PROBE ' + JSON.stringify(out);
+</script>
