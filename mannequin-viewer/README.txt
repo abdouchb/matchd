@@ -13,6 +13,10 @@ Aim game modes: Aim trainer (60 s, steel targets) or VS AI (enemy squads take co
           flank and fall back; walls and crates block bullets both ways; survive the waves, HP regenerates)
 Phones: push the left stick further to run (or toggle RUN); resolution adapts to keep the frame rate up
           Edit IK (drag handles, T move / R rotate) · Aim game: mouse aim, LMB fire, RMB zoom, Esc pause
+Character: model/Player_kachabia.fbx (UE5 Manny skeleton) by default; ?model=mannequin loads the old UE4 Mannequin.FBX.
+          Its textures are not embedded (the FBX points at a missing Player_kachabia.fbm folder), so neutral tones are used;
+          re-export from Blender with Path Mode = Copy + Embed Textures to get the real textures.
+Locomotion QA: http://localhost:8000/?test  (foot-contact slide, pelvis acceleration, knee velocity, reach metrics in the page title)
 Files: index.html (all code) · model/Mannequin.FBX · anim/*.FBX (pose sources) · assets/reference.jpg
        assets/glb/m4_fps.glb (M4 + FPS hand/reload animation, Sketchfab pack) · assets/sfx/*.mp3 (sounds cut from the reference video)
 تشغيل: شغّل start-windows.bat ثم افتح http://localhost:8000
