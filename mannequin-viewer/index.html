@@ -2269,6 +2269,8 @@ function runSim() {
   }
   if (params.has('freezeFlash')) { fire(); updateCharacter(0.012); }
   simFrozen = true;
+  // Headless capture hook: advance the frozen sim by N seconds (filmstrips / QA).
+  window.__simStep = sec => { for (let t = 0; t < sec - 1e-9; t += step60) { simTime += step60; updateCharacter(step60); updateFX(step60); } };
   if (params.has('debug')) document.title = 'SIM ' + JSON.stringify({ gq: [V(0, 0, 1).applyQuaternion(gunState.q).toArray().map(x => +x.toFixed(2)), V(0, 1, 0).applyQuaternion(gunState.q).toArray().map(x => +x.toFixed(2))], rl: [RL.on, +RL.t.toFixed(2), RL.env.toFixed(2), RL.err, RL.seg, W.cur.ammo], weapon: W.cur.name, blend: W.blend, score: game.score, hits: game.hits, shots: game.shots, clip: mm.clips[mm.clip].name, v: mm.vel });
 }
 // ?test : scripted locomotion scenarios with foot-contact / popping metrics written into the page title.
