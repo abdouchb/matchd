@@ -22,6 +22,13 @@ void driver_register(pci_driver_t *driver) {
     }
 }
 
+/* Devices whose drivers locate them via pci_find_device() rather than registering here. */
+static bool probed_by_subsystem(const pci_device_t *dev) {
+    if (dev->vendor_id == 0x10EC)
+        return dev->device_id == 0x8139 || dev->device_id == 0x8168 || dev->device_id == 0x8136;
+    return dev->vendor_id == 0x8086 && dev->device_id == 0x2415; /* AC'97 */
+}
+
 void driver_manager_init(void) {
     kprintf("[DriverMgr] Initializing smart driver subsystem...\n");
 
@@ -97,7 +104,10 @@ void driver_manager_init(void) {
             }
         }
 
-        if (!claimed) {
+        if (!claimed && probed_by_subsystem(dev)) {
+            kprintf("[DriverMgr] INFO: %04x:%04x is handled by its subsystem probe (no PCI-manager driver)\n",
+                    dev->vendor_id, dev->device_id);
+        } else if (!claimed) {
             // Provide smart fallback messages for common classes
             if (dev->class_code == 0x02 && dev->subclass == 0x00) {
                 kprintf("[DriverMgr] INFO: Unsupported Ethernet Controller found (Vendor: %04x, Device: %04x)\n", dev->vendor_id, dev->device_id);

@@ -46,20 +46,20 @@ bool intel_gma_init(const pci_device_t *dev, int width, int height, int pitch) {
     pci_cmd |= (1 << 1) | (1 << 2); // Memory Space (0x02) | Bus Master (0x04)
     pci_write_config_word(dev->bus, dev->device, dev->function, 0x04, pci_cmd);
     
-    /* 2. Detect Intel GPU Generation */
+    /* 2. Detect Intel GPU Generation. Only known Gen6-9 parts are driven; anything else
+     * (pre-Gen6, Gen11+) has a different GTT/ring layout and must stay on the GOP framebuffer. */
     uint16_t id = dev->device_id;
-    int gen = 6;
-    if ((id & 0xFF00) == 0x1600) {
-        gen = 8; // Broadwell
-    } else if ((id & 0xFF00) == 0x1900 || (id & 0xFF00) == 0x5900 || 
-               (id & 0xFF00) == 0x3E00 || (id & 0xFF00) == 0x9B00) {
-        gen = 9; // Skylake / Kaby Lake / Coffee Lake
-    } else if ((id & 0xFF00) == 0x0400 || (id & 0xFF00) == 0x0A00 || (id & 0xFF00) == 0x0D00) {
-        gen = 7; // Haswell (Gen 7.5)
-    } else if ((id & 0xFF00) == 0x0100) {
-        gen = ((id & 0x00F0) == 0x0050 || (id & 0x00F0) == 0x0060) ? 7 : 6;
-    } else if (id >= 0x1600) {
-        gen = 8; // Modern Intel Gen8+
+    int gen = 0;
+    switch (id & 0xFF00) {
+        case 0x0100: gen = ((id & 0x00F0) == 0x0050 || (id & 0x00F0) == 0x0060) ? 7 : 6; break;
+        case 0x0400: case 0x0A00: case 0x0D00: gen = 7; break;
+        case 0x1600: gen = 8; break;
+        case 0x1900: case 0x5900: case 0x3E00: case 0x9B00: gen = 9; break;
+        default: break;
+    }
+    if (!gen) {
+        kprintf("Intel GMA: Device 0x%x not supported, using framebuffer fallback.\n", id);
+        return false;
     }
     gma_state.gen = gen;
     kprintf("Intel GMA: Detected Gen%d graphics architecture.\n", gen);
@@ -90,8 +90,8 @@ bool intel_gma_init(const pci_device_t *dev, int width, int height, int pitch) {
     extern uint64_t *kernel_pml4;
     extern void vmm_map_mmio(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags);
     
-    /* 4. Map 8MB of MMIO space (Registers + Full GTT Table) */
-    for (uint64_t offset = 0; offset < 8 * 1024 * 1024; offset += PAGE_SIZE) {
+    /* 4. Map 4MB of MMIO space (registers + GTT); Gen6/7 BAR0 is only 4MB */
+    for (uint64_t offset = 0; offset < 4 * 1024 * 1024; offset += PAGE_SIZE) {
         vmm_map_mmio(kernel_pml4, gma_state.mmio_base_phys + hhdm_offset + offset, gma_state.mmio_base_phys + offset, 0x1B);
     }
     
@@ -114,6 +114,12 @@ bool intel_gma_init(const pci_device_t *dev, int width, int height, int pitch) {
         gma_state.frontbuffer_gtt_offset = gma_state.orig_dspcsurf;
     }
     kprintf("Intel GMA: Frontbuffer GTT offset: 0x%x\n", gma_state.frontbuffer_gtt_offset);
+    if (!(intel_read32(DSPACNTR) & (1u << 31)) && !(intel_read32(DSPBCNTR) & (1u << 31)) &&
+        !(intel_read32(0x72180) & (1u << 31))) {
+        kprintf("Intel GMA: No active display plane, using framebuffer fallback.\n");
+        gma_state.mmio_base_virt = NULL;
+        return false;
+    }
     
     /* 6. Initialize Blitter Ring Buffer */
     intel_ring_t *ring = &gma_state.blt_ring;

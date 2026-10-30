@@ -7,17 +7,8 @@
 extern uint64_t hhdm_offset;
 static bool gpu_ready = false;
 static virtqueue_t controlq;
-static virtqueue_t cursorq;
 
 static volatile virtio_pci_common_cfg_t *common_cfg = NULL;
-
-// Wait for device to process controlq (polling)
-static void virtio_gpu_poll(void) {
-    while (controlq.last_used_idx == controlq.used->idx) {
-        __asm__ volatile("pause");
-    }
-    controlq.last_used_idx++;
-}
 
 bool virtio_gpu_init(const pci_device_t *dev) {
     kprintf("VirtIO GPU: Initializing device %x:%x\n", dev->vendor_id, dev->device_id);
@@ -97,6 +88,7 @@ bool virtio_gpu_init(const pci_device_t *dev) {
 }
 
 uint32_t *virtio_gpu_flip(uint32_t *vram_base) {
+    (void)vram_base;
     if (!gpu_ready) return NULL;
     
     // In a real implementation, we would send VIRTIO_GPU_CMD_SET_SCANOUT

@@ -45,17 +45,29 @@ void fb_init(struct limine_framebuffer *fb) {
     fb_ptr = (uint32_t *)fb->address;
     width = fb->width;
     height = fb->height;
-    pitch = fb->pitch;
+    /* Backbuffer is always tightly packed XRGB; the HAL converts to the real scanout format. */
+    pitch = width * 4;
+    int front_pitch = fb->pitch;
+    if (fb->bpp != 32 || fb->red_mask_shift != 16 || fb->green_mask_shift != 8 || fb->blue_mask_shift != 0 ||
+        front_pitch != pitch) {
+        kprintf("FB: Non-default mode %dx%d bpp=%d pitch=%d (rgb shifts %d/%d/%d) - using converting blit.\n",
+                width, height, (int)fb->bpp, front_pitch,
+                fb->red_mask_shift, fb->green_mask_shift, fb->blue_mask_shift);
+    }
+    gpu_hal_set_front_format(front_pitch, fb->bpp, fb->red_mask_shift, fb->red_mask_size,
+                             fb->green_mask_shift, fb->green_mask_size,
+                             fb->blue_mask_shift, fb->blue_mask_size);
 
     /* 
      * Allocate unified backbuffer in System RAM for 100% artifact-free, tear-free rendering.
      * Hardware page-flipping with partial dirty rects causes double-buffer tearing / striping.
      */
     uint64_t fb_size = height * pitch;
-    memset(fb_ptr, 0, fb_size); /* Clean physical VRAM immediately on boot to eliminate bootloader residue */
+    memset(fb_ptr, 0, (uint64_t)height * front_pitch); /* Clean physical VRAM immediately on boot to eliminate bootloader residue */
     backbuffer = (uint32_t *)kmalloc(fb_size);
     if (!backbuffer) {
         backbuffer = fb_ptr;
+        pitch = front_pitch;
         kprintf("FB: [WARNING] Heap exhausted. Drawing directly to VRAM.\n");
     } else {
         memset(backbuffer, 0, fb_size);

@@ -64,6 +64,7 @@ void gpu_hal_copy_rect(uint32_t *dst, int dst_pitch_bytes, int dx, int dy,
                        const uint32_t *src, int src_pitch_bytes, int sx, int sy, int w, int h);
 void gpu_hal_blend_rect(uint32_t *dst, int dst_pitch_bytes, int dx, int dy,
                         const uint32_t *src, int src_pitch_bytes, int sx, int sy, int w, int h, uint8_t alpha);
+void gpu_hal_set_front_format(int pitch_bytes, int bpp, int rs, int rsz, int gs, int gsz, int bs, int bsz);
 void gpu_hal_swap_buffers(uint32_t *front, uint32_t *back, int pitch_bytes, int width, int height);
 
 /* Legacy & Direct Page-Flipping API */

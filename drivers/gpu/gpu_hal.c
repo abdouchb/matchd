@@ -149,11 +149,47 @@ static void sw_blend_rect(uint32_t *dst, int dst_pitch_bytes, int dx, int dy,
     }
 }
 
+/* Scanout format of the real framebuffer; defaults to 32bpp XRGB, pitch == back pitch. */
+static int front_pitch = 0;
+static int front_bpp = 32;
+static uint8_t front_rs = 16, front_gs = 8, front_bs = 0;
+static uint8_t front_rsz = 8, front_gsz = 8, front_bsz = 8;
+
+void gpu_hal_set_front_format(int pitch_bytes, int bpp, int rs, int rsz, int gs, int gsz, int bs, int bsz) {
+    front_pitch = pitch_bytes;
+    front_bpp = bpp;
+    front_rs = rs; front_rsz = rsz;
+    front_gs = gs; front_gsz = gsz;
+    front_bs = bs; front_bsz = bsz;
+}
+
+static inline bool front_is_native(void) {
+    return front_bpp == 32 && front_rs == 16 && front_gs == 8 && front_bs == 0 &&
+           front_rsz == 8 && front_gsz == 8 && front_bsz == 8;
+}
+
+/* Slow path for scanout formats other than XRGB8888 (BGR order, 16/24bpp). */
+static void sw_convert_row(uint8_t *d, const uint32_t *s, int n) {
+    int bytes = front_bpp / 8;
+    for (int i = 0; i < n; i++) {
+        uint32_t c = s[i];
+        uint32_t r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
+        uint32_t v = ((r >> (8 - front_rsz)) << front_rs) |
+                     ((g >> (8 - front_gsz)) << front_gs) |
+                     ((b >> (8 - front_bsz)) << front_bs);
+        for (int k = 0; k < bytes; k++) d[i * bytes + k] = (uint8_t)(v >> (8 * k));
+    }
+}
+
 static void sw_swap_buffers(uint32_t *front, uint32_t *back, int pitch_bytes, int width, int height) {
     if (!front || !back || front == back) return;
 
     int count = dirty_rect_get_count();
     if (count == 0) return;
+
+    int fpitch = front_pitch > 0 ? front_pitch : pitch_bytes;
+    bool native = front_is_native();
+    int bytes = front_bpp / 8;
 
     for (int i = 0; i < count; i++) {
         rect_t *r = dirty_rect_get(i);
@@ -166,19 +202,18 @@ static void sw_swap_buffers(uint32_t *front, uint32_t *back, int pitch_bytes, in
         if (ry + rh > height) rh = height - ry;
         if (rw <= 0 || rh <= 0) continue;
 
-        /* Fast contiguous blit when updating entire screen width */
-        if (rx == 0 && rw == width && pitch_bytes == width * 4) {
-            uint8_t *dst = (uint8_t *)front + ry * pitch_bytes;
-            const uint8_t *src = (const uint8_t *)back + ry * pitch_bytes;
-            memcpy(dst, src, (size_t)rh * pitch_bytes);
+        if (native && rx == 0 && rw == width && fpitch == pitch_bytes && pitch_bytes == width * 4) {
+            memcpy((uint8_t *)front + (size_t)ry * fpitch,
+                   (const uint8_t *)back + (size_t)ry * pitch_bytes, (size_t)rh * pitch_bytes);
             continue;
         }
 
         for (int row = 0; row < rh; row++) {
             int y = ry + row;
-            uint32_t *d = (uint32_t *)((uint8_t *)front + y * pitch_bytes + rx * 4);
-            const uint32_t *s = (const uint32_t *)((const uint8_t *)back + y * pitch_bytes + rx * 4);
-            memcpy(d, s, rw * 4);
+            uint8_t *d = (uint8_t *)front + (size_t)y * fpitch + (size_t)rx * bytes;
+            const uint32_t *s = (const uint32_t *)((const uint8_t *)back + (size_t)y * pitch_bytes + rx * 4);
+            if (native) memcpy(d, s, (size_t)rw * 4);
+            else sw_convert_row(d, s, rw);
         }
     }
 }
@@ -278,7 +313,6 @@ void gpu_init(void) {
             gpu_info.device_id = d->device_id;
             gpu_info.mmio_base = d->bar[0] & 0xFFFFFFF0;
             gpu_info.accel_available = true;
-            gpu_info.page_flip_available = true;
             active_ops = &intel_ops;
             kprintf("Graphics HAL: Intel HD (0x%x) selected | 2D BLT & Page-Flip\n", d->device_id);
             return;
@@ -379,6 +413,8 @@ bool gpu_setup_double_buffer(int width, int height) {
     if (gpu_info.type == GPU_TYPE_VIRTIO || gpu_info.type == GPU_TYPE_BOCHS_BGA) {
         /* VirtIO GPU / Limine FB does not expose a 2-page physical VRAM BAR if fb_base is 0 */
         if (gpu_info.fb_base == 0) return false;
+        uint16_t bga_id = bga_read(VBE_DISPI_INDEX_ID);
+        if (bga_id < 0xB0C0 || bga_id > 0xB0CF) return false;
 
         uint16_t vram_64k = bga_read(VBE_DISPI_INDEX_VIDEO_MEM_64K);
         uint32_t vram_bytes = (uint32_t)vram_64k * 64 * 1024;

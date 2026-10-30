@@ -94,11 +94,11 @@ void gpu_surface_destroy(gpu_surface_t* surface) {
 }
 
 void gpu_surface_lock(gpu_surface_t* surface) {
-    // Stub
+    (void)surface;
 }
 
 void gpu_surface_unlock(gpu_surface_t* surface) {
-    // Stub
+    (void)surface;
 }
 
 void gpu_renderer_fill_rect(int x, int y, int w, int h, uint32_t color) {
