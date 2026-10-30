@@ -1,0 +1,13 @@
+<script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.186.1/build/three.module.js","three/addons/":"https://unpkg.com/three@0.186.1/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+const o = await new FBXLoader().loadAsync('model/Player_kachabia.fbx'); o.updateMatrixWorld(true);
+const cnt = {}, path = n => { const p = []; let x = n; while (x) { p.push(x.name + (x.isBone ? '*' : '')); x = x.parent; } return p.reverse().join('/'); };
+o.traverse(n => { if (n.isBone) (cnt[n.name] ||= []).push(n); });
+const dup = Object.entries(cnt).filter(([k, v]) => v.length > 1).map(([k, v]) => k + ':' + v.length);
+const sk = []; o.traverse(n => { if (n.isSkinnedMesh) sk.push({ m: n.name, nb: n.skeleton.bones.length, footIsLast: n.skeleton.bones.includes(cnt.foot_l.at(-1)), footIsFirst: n.skeleton.bones.includes(cnt.foot_l[0]), bindMode: n.bindMode }); });
+document.title = 'PROBE ' + JSON.stringify({ dup: dup.slice(0, 20), ndup: dup.length, footPaths: cnt.foot_l.map(path), thighPath: path(cnt.thigh_l[0]), pelvisPath: path(cnt.pelvis[0]), sk,
+  pelvisQ: cnt.pelvis[0].quaternion.toArray().map(x => +x.toFixed(3)), rootQ: cnt.root?.[0].quaternion.toArray().map(x => +x.toFixed(3)), rootS: cnt.root?.[0].scale.toArray(), rootParent: cnt.root?.[0].parent?.name,
+  arm: cnt.root?.[0].parent?.scale.toArray(), armQ: cnt.root?.[0].parent?.quaternion.toArray().map(x => +x.toFixed(3)) });
+</script>
