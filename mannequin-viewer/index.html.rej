@@ -1,0 +1,11 @@
+--- index.html
++++ index.html
+@@ -1196,7 +1262,7 @@ function stepLocomotion(dt) {
+   const m = Math.hypot(inp.x, inp.z);
+   if (m > 0.01) {
+     const dx = inp.x / m, dz = inp.z / m;
+-    let sp = inp.run ? (dz > 0.35 ? RUN_SPEED : 175) : WALK_SPEED * (1 - 0.2 * Math.abs(dx));
++    let sp = inp.run ? (dz > 0.35 ? RUN_SPEED : 175) : WALK_SPEED * (1 - 0.28 * Math.abs(dx));
+     if (dz < -0.35) sp = Math.min(sp, inp.run ? 150 : 115);
+     sp *= inp.mag ?? 1;                                                   // analog stick
+     des = [dx * sp, dz * sp];
