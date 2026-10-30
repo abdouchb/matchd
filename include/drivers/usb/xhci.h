@@ -40,7 +40,7 @@
 #define XHCI_OP_CRCR        0x18
 #define XHCI_OP_DCBAAP      0x30
 #define XHCI_OP_CONFIG      0x38
-#define XHCI_OP_PORTSC_BASE 0x40
+#define XHCI_OP_PORTSC_BASE 0x400
 
 // xHCI Runtime Registers offsets (from RTSOFF)
 #define XHCI_RT_MFINDEX     0x00
