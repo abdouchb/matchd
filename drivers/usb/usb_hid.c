@@ -1,4 +1,5 @@
 #include "drivers/usb/usb_hid.h"
+#include "drivers/framebuffer.h"
 #include "kernel/early_boot_log.h"
 #include "zarqaa/string.h"
 
@@ -100,6 +101,14 @@ static int mouse_y = 0;
 static int mouse_z = 0;
 static int screen_w = 1024;
 static int screen_h = 768;
+static bool bounds_set = false;
+
+// Follow the real framebuffer size until a UI sets explicit bounds.
+static void sync_bounds(void) {
+    if (bounds_set) return;
+    int w = fb_get_width(), h = fb_get_height();
+    if (w > 0 && h > 0) { screen_w = w; screen_h = h; }
+}
 static bool left_btn = false;
 static bool right_btn = false;
 static bool middle_btn = false;
@@ -185,6 +194,7 @@ void input_mouse_push(int dx, int dy, int dz, bool left, bool right, bool middle
     right_btn = right;
     middle_btn = middle;
     
+    sync_bounds();
     mouse_x += dx;
     mouse_y -= dy; // Invert Y 
     mouse_z += dz;
@@ -193,6 +203,20 @@ void input_mouse_push(int dx, int dy, int dz, bool left, bool right, bool middle
     if (mouse_y < 0) mouse_y = 0;
     if (mouse_x >= screen_w) mouse_x = screen_w - 1;
     if (mouse_y >= screen_h) mouse_y = screen_h - 1;
+}
+
+void input_mouse_push_abs(int nx, int ny, int dz, bool left, bool right, bool middle) {
+    prev_left_btn = left_btn;
+    prev_right_btn = right_btn;
+
+    left_btn = left;
+    right_btn = right;
+    middle_btn = middle;
+
+    sync_bounds();
+    mouse_x = (int)((int64_t)nx * (screen_w - 1) / 32767);
+    mouse_y = (int)((int64_t)ny * (screen_h - 1) / 32767);
+    mouse_z += dz;
 }
 
 /* --- Legacy PS/2 & Physical Hardware 8042 Controller --- */
@@ -445,10 +469,16 @@ bool keyboard_caps_locked(void) {
     return caps_lock;
 }
 
-int mouse_get_x(void) { return mouse_x; }
+// USB is polled: pump the controller so the pointer updates without key events.
+static void usb_pump(void) {
+    extern void xhci_poll_events(void);
+    xhci_poll_events();
+}
+
+int mouse_get_x(void) { usb_pump(); return mouse_x; }
 int mouse_get_y(void) { return mouse_y; }
 int mouse_get_z(void) { return mouse_z; }
-bool mouse_left_pressed(void) { return left_btn; }
+bool mouse_left_pressed(void) { usb_pump(); return left_btn; }
 bool mouse_right_pressed(void) { return right_btn; }
 bool mouse_middle_pressed(void) { return middle_btn; }
 
@@ -467,6 +497,7 @@ bool mouse_right_clicked(void) {
 void mouse_set_bounds(int max_x, int max_y) {
     screen_w = max_x;
     screen_h = max_y;
+    bounds_set = true;
     mouse_x = max_x / 2;
     mouse_y = max_y / 2;
 }

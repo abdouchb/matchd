@@ -18,6 +18,8 @@ void input_init(void);
 // Hook functions for USB core to push data to the input subsystem
 void input_keyboard_push(uint8_t scancode, bool is_release);
 void input_mouse_push(int dx, int dy, int dz, bool left, bool right, bool middle);
+// Absolute pointer (usb-tablet): nx/ny normalized to 0..32767, dz is a wheel delta
+void input_mouse_push_abs(int nx, int ny, int dz, bool left, bool right, bool middle);
 
 // Event-driven API
 bool keyboard_has_event(void);
