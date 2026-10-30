@@ -17,7 +17,10 @@ else
 endif
 
 # Compiler Flags
-CFLAGS = -target x86_64-pc-none-elf \
+# -nostdinc keeps host libc headers (/usr/include) out of the freestanding build
+CLANG_INC := $(shell $(CC) -print-resource-dir)/include
+
+CFLAGS = -target x86_64-pc-none-elf -nostdinc -isystem "$(CLANG_INC)" \
          -ffreestanding -fno-stack-protector -fno-stack-check -fno-lto -fno-pic -fno-pie \
          -m64 -march=x86-64 -mno-80387 -mno-mmx -msse -msse2 -mno-red-zone \
          -Wall -Wextra -isystem include/compat -Iinclude -Ilibs/lexbor_src/source \
@@ -259,7 +262,7 @@ $(BUILD_DIR)/zarqaaos.iso: $(BUILD_DIR)/zarqaaos.elf $(USR_BINS)
 	@mkdir -p $(BUILD_DIR)/iso_root/boot
 	@mkdir -p $(BUILD_DIR)/iso_root/EFI/BOOT
 	@cp $(BUILD_DIR)/zarqaaos.elf $(BUILD_DIR)/iso_root/boot/
-	@cp boot_bg.png $(BUILD_DIR)/iso_root/boot/
+	@cp "desktop/boot image/Zarqaa_boot.png" $(BUILD_DIR)/iso_root/boot/boot_bg.png
 	@echo "=== Creating Initrd (Ramdisk) ==="
 	@cd fat_root && tar -cf ../$(BUILD_DIR)/initrd.tar *
 	@cp $(BUILD_DIR)/initrd.tar $(BUILD_DIR)/iso_root/boot/
