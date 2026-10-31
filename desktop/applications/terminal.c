@@ -181,7 +181,7 @@ static void execute_command(struct terminal_state *state) {
         if (fd >= 3) {
             char msg[32];
             strcpy(msg, "Hello from POSIX Syscall!");
-            ssize_t w = write(fd, msg, strlen(msg));
+            (void)write(fd, msg, strlen(msg));
             close(fd);
             
             char out[64];

@@ -193,7 +193,13 @@ DESKTOP_SRCS = \
 	desktop/applications/boot_logger.c \
 	desktop/applications/device_manager.c \
 	desktop/applications/image_viewer.c \
-	desktop/applications/benchmark.c
+	desktop/applications/benchmark.c \
+	desktop/applications/clock_app.c \
+	desktop/applications/calendar_app.c \
+	desktop/applications/sysinfo_app.c \
+	desktop/applications/game2048.c \
+	desktop/applications/minesweeper.c \
+	gui/new_app_icons.c
 
 C_SOURCES += $(DESKTOP_SRCS)
 

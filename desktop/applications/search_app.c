@@ -42,6 +42,11 @@ static struct { const char *name; int id; } known_apps[] = {
     {"Browser Pro", APP_BROWSER_PRO},
     {"Device Manager", 15}, // APP_DEVICE_MANAGER
     {"Paint", 116},
+    {"Clock", 19},
+    {"Calendar", 20},
+    {"About Zarqaa OS", 21},
+    {"2048", 22},
+    {"Minesweeper", 23},
     {NULL, 0}
 };
 

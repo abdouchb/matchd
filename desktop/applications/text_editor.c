@@ -565,9 +565,7 @@ else if ((left_clicked || left_pressed) && my > TOP_BAR_HEIGHT) {
         best_pos = 0; // dragged above the text
     } else {
         int best_diff = 10000;
-        int current_line_cy = cy;
         bool found_line = false;
-        int line_end_pos = 0;
         
         for (int i = 0; i <= state->text_length; i++) {
             // If the mouse's Y coordinate falls within this line
@@ -586,7 +584,6 @@ else if ((left_clicked || left_pressed) && my > TOP_BAR_HEIGHT) {
                 break; 
             }
             
-            line_end_pos = i;
             if (i < state->text_length) {
                 if (state->text_buffer[i] == '\n') {
                     cy += char_h;

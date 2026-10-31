@@ -301,7 +301,7 @@ static void paint_on_draw(struct window *win) {
     const char *tools[] = {"Brush", "Erase", "Line", "Rect", "Circ", "Fill"}; 
     int ty = UI_TOP_BAR_H + 20;
     for (int i = 0; i < 6; i++) {
-        bool active = (state->current_tool == i);
+        bool active = ((int)state->current_tool == i);
         if (active) {
             gfx_draw_rounded_rect_filled(5, ty, 50, 40, 8, 0xFF313244);
         }
