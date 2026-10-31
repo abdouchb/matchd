@@ -30,6 +30,9 @@ CFLAGS = -target x86_64-pc-none-elf -nostdinc -isystem "$(CLANG_INC)" \
          -include string.h -include stdlib.h \
          -mcmodel=kernel
 
+# Emit .d files so header edits rebuild every object that includes them
+DEPFLAGS = -MMD -MP
+
 # Linker Flags
 LDFLAGS = -nostdlib -static -no-pie -z text -z max-page-size=0x1000 -T linker.ld
 
@@ -294,20 +297,20 @@ $(BUILD_DIR)/zarqaaos.elf: $(OBJECTS)
 $(OBJ_DIR)/%.o: %.c
 	@echo "[CC]  $<"
 	@mkdir -p $(dir $@)
-	@$(CC) $(CFLAGS) -c $< -o $@
+	@$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Special rule: Compile Duktape with its own isolated flags (no -Wall conflicts)
 $(DUK_OBJ): libs/duktape/duktape.c libs/duktape/zarqaa_duk_shim.h
 	@echo "[CC]  libs/duktape/duktape.c (freestanding mode)"
 	@mkdir -p $(dir $(DUK_OBJ))
-	@$(CC) $(DUK_FLAGS) -c libs/duktape/duktape.c -o $(DUK_OBJ)
+	@$(CC) $(DUK_FLAGS) $(DEPFLAGS) -c libs/duktape/duktape.c -o $(DUK_OBJ)
 
 # Special rule: Compile js_engine.c with same isolated flags (no isystem compat)
 JS_ENGINE_OBJ = $(OBJ_DIR)/kernel/js/js_engine.o
 $(JS_ENGINE_OBJ): kernel/js/js_engine.c libs/duktape/zarqaa_duk_shim.h
 	@echo "[CC]  kernel/js/js_engine.c (duktape mode)"
 	@mkdir -p $(dir $(JS_ENGINE_OBJ))
-	@$(CC) $(DUK_FLAGS) -c kernel/js/js_engine.c -o $(JS_ENGINE_OBJ)
+	@$(CC) $(DUK_FLAGS) $(DEPFLAGS) -c kernel/js/js_engine.c -o $(JS_ENGINE_OBJ)
 
 # Compile ASM
 $(OBJ_DIR)/%.o: %.asm
@@ -325,3 +328,5 @@ run: $(BUILD_DIR)/zarqaaos.iso
 	@echo "This is a test file to prove the FAT driver works!" > fat_root/test.txt
 	@cp -r www/* fat_root/www/
 	"/c/Program Files/qemu/qemu-system-x86_64.exe" -accel tcg,thread=multi -smp 2 -cpu max -m 2G -M q35 -bios ovmf/OVMF.fd -device virtio-vga -cdrom $(BUILD_DIR)/zarqaaos.iso -drive file=fat:rw:fat_root,format=raw,media=disk,if=ide,index=0 -no-reboot -no-shutdown -serial stdio -serial tcp:127.0.0.1:4444,server,nowait -netdev user,id=u1 -device rtl8139,netdev=u1 -audiodev dsound,id=snd0 -machine pcspk-audiodev=snd0 -device AC97,audiodev=snd0
+
+-include $(OBJECTS:.o=.d)
