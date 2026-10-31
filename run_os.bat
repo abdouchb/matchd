@@ -1,6 +1,9 @@
 @echo off
 title Zarqaa OS - Auto Build & Run
-cd /d "C:\Users\ipiou\Desktop\pcb ai\BU\ZarqaaOS"
+rem Build the folder this script lives in, not a hard-coded copy
+cd /d "%~dp0"
+set "ZARQAA_DIR=%~dp0"
+if not defined MSYS_BASH set "MSYS_BASH=C:\Users\ipiou\Downloads\msys64\usr\bin\bash.exe"
 
 echo ===================================================
 echo [1/2] Compiling Zarqaa OS & Building ISO...
