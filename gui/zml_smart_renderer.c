@@ -320,6 +320,94 @@ static void zsr_blend_pixel(
     *pixel = 0xFF000000 | rb | g;
 }
 
+/* Span rasterizer: same math as zsr_blend_pixel, but one bounds check per
+ * row instead of a call + checks per pixel (the hot path of every frame). */
+static inline void zsr_blend_run(uint32_t *d, int n, zsr_color_t color)
+{
+    uint32_t alpha = ZSR_ALPHA(color);
+    if (alpha == 0)
+        return;
+
+    if (alpha >= 255) {
+        uint32_t c = color | 0xFF000000;
+        for (int i = 0; i < n; ++i)
+            d[i] = c;
+        return;
+    }
+
+    uint32_t inv_alpha = 255 - alpha;
+    uint32_t src_rb = (color & 0x00FF00FF) * alpha + 0x00800080;
+    uint32_t src_g  = (color & 0x0000FF00) * alpha + 0x00008000;
+    for (int i = 0; i < n; ++i) {
+        uint32_t bg = d[i];
+        uint32_t rb = ((src_rb + (bg & 0x00FF00FF) * inv_alpha) >> 8) & 0x00FF00FF;
+        uint32_t g  = ((src_g  + (bg & 0x0000FF00) * inv_alpha) >> 8) & 0x0000FF00;
+        d[i] = 0xFF000000 | rb | g;
+    }
+}
+
+/* Blend pixels [x0, x1] (inclusive) of row y, clipped to clip and the surface */
+static void zsr_hspan(
+    zsr_surface_t *surface,
+    int y,
+    int x0,
+    int x1,
+    zsr_rect_t clip,
+    zsr_color_t color
+)
+{
+    if (y < clip.y || y >= clip.y + clip.height || y < 0 || y >= surface->height)
+        return;
+    if (x0 < clip.x) x0 = clip.x;
+    if (x1 > clip.x + clip.width - 1) x1 = clip.x + clip.width - 1;
+    if (x0 < 0) x0 = 0;
+    if (x1 > surface->width - 1) x1 = surface->width - 1;
+    if (x0 > x1)
+        return;
+
+    uint32_t *row = (uint32_t *)((uint8_t *)surface->pixels + (size_t)y * surface->pitch);
+    zsr_blend_run(row + x0, x1 - x0 + 1, color);
+}
+
+/* Row extent of zsr_inside_rounded_rect() for row y. Like that predicate it is
+ * not bounded by the rect, so callers intersect with their visible area.
+ * Returns false when no pixel of the row is inside; *all = whole row inside. */
+static bool zsr_round_row_span(zsr_rect_t rect, int radius, int y, int *l, int *r, bool *all)
+{
+    *all = false;
+    if (radius <= 0) {
+        *all = true;
+        return true;
+    }
+
+    int right = rect.x + rect.width - 1;
+    int bottom = rect.y + rect.height - 1;
+    int cy_top = rect.y + radius;
+    int cy_bot = bottom - radius;
+
+    if (y >= cy_top && y <= cy_bot) {
+        *all = true;
+        return true;
+    }
+
+    int dy = y < cy_top ? y - cy_top : y - cy_bot;
+    int rem = radius * radius - dy * dy;
+    int cx_left = rect.x + radius;
+    int cx_right = right - radius;
+
+    if (rem < 0) {
+        *l = cx_left;
+        *r = cx_right;
+    } else {
+        int d = 0;
+        while ((d + 1) * (d + 1) <= rem)
+            ++d;
+        *l = cx_left - d;
+        *r = cx_right + d > cx_left - 1 ? cx_right + d : cx_left - 1;
+    }
+    return *l <= *r;
+}
+
 static void zsr_fill_rect_clipped(
     zsr_surface_t *surface,
     zsr_rect_t rect,
@@ -329,14 +417,11 @@ static void zsr_fill_rect_clipped(
 {
     rect = zsr_rect_clip(rect, clip);
 
-    if (zsr_rect_empty(rect))
+    if (zsr_rect_empty(rect) || !surface || !surface->pixels)
         return;
 
-    for (int y = rect.y; y < rect.y + rect.height; ++y) {
-        for (int x = rect.x; x < rect.x + rect.width; ++x) {
-            zsr_blend_pixel(surface, x, y, color);
-        }
-    }
+    for (int y = rect.y; y < rect.y + rect.height; ++y)
+        zsr_hspan(surface, y, rect.x, rect.x + rect.width - 1, rect, color);
 }
 
 static bool zsr_inside_rounded_rect(
@@ -380,43 +465,18 @@ static void zsr_fill_rounded_rect_clipped(
         return;
 
     uint8_t alpha = ZSR_ALPHA(color);
-    if (alpha == 0) return;
-
-    if (radius <= 0) {
-        for (int y = visible.y; y < visible.y + visible.height; ++y) {
-            for (int x = visible.x; x < visible.x + visible.width; ++x) {
-                zsr_blend_pixel(surface, x, y, color);
-            }
-        }
-        return;
-    }
-
-    int right = rect.x + rect.width - 1;
-    int bottom = rect.y + rect.height - 1;
-    int r2 = radius * radius;
-    int cy_top = rect.y + radius;
-    int cy_bot = bottom - radius;
-    int cx_left = rect.x + radius;
-    int cx_right = right - radius;
+    if (alpha == 0 || !surface || !surface->pixels) return;
 
     for (int y = visible.y; y < visible.y + visible.height; ++y) {
-        bool in_corner_y = (y < cy_top || y > cy_bot);
-        int dy2 = 0;
-        if (y < cy_top) { int dy = y - cy_top; dy2 = dy * dy; }
-        else if (y > cy_bot) { int dy = y - cy_bot; dy2 = dy * dy; }
-
-        for (int x = visible.x; x < visible.x + visible.width; ++x) {
-            if (in_corner_y) {
-                if (x < cx_left) {
-                    int dx = x - cx_left;
-                    if (dx * dx + dy2 > r2) continue;
-                } else if (x > cx_right) {
-                    int dx = x - cx_right;
-                    if (dx * dx + dy2 > r2) continue;
-                }
-            }
-            zsr_blend_pixel(surface, x, y, color);
+        int l, r;
+        bool all;
+        if (!zsr_round_row_span(rect, radius, y, &l, &r, &all))
+            continue;
+        if (all) {
+            l = visible.x;
+            r = visible.x + visible.width - 1;
         }
+        zsr_hspan(surface, y, l, r, visible, color);
     }
 }
 
@@ -450,27 +510,34 @@ static void zsr_draw_border_clipped(
         zsr_rect_t visible = zsr_rect_clip(outer, clip);
         if (zsr_rect_empty(visible)) continue;
 
-        int margin = radius + 2;
-        int inner_y1 = outer.y + margin;
-        int inner_y2 = outer.y + outer.height - margin;
-        int inner_x1 = outer.x + margin;
-        int inner_x2 = outer.x + outer.width - margin;
+        if (!surface || !surface->pixels) return;
+
+        int vx0 = visible.x;
+        int vx1 = visible.x + visible.width - 1;
 
         for (int y = visible.y; y < visible.y + visible.height; ++y) {
-            bool middle_y = (y >= inner_y1 && y < inner_y2 && inner_x1 < inner_x2);
-            for (int x = visible.x; x < visible.x + visible.width; ++x) {
-                /* Ultra-fast skip through window interior: 180x speedup */
-                if (middle_y && x >= inner_x1 && x < inner_x2) {
-                    x = inner_x2 - 1;
-                    continue;
-                }
+            int ol, orr, il, ir;
+            bool o_all, i_all;
+            if (!zsr_round_row_span(outer, radius - i, y, &ol, &orr, &o_all))
+                continue;
+            if (o_all) { ol = vx0; orr = vx1; }
+            if (ol < vx0) ol = vx0;
+            if (orr > vx1) orr = vx1;
+            if (ol > orr)
+                continue;
 
-                bool in_outer = zsr_inside_rounded_rect(x, y, outer, radius - i);
-                bool in_inner = zsr_inside_rounded_rect(x, y, inner, radius - i - 1);
-
-                if (in_outer && !in_inner)
-                    zsr_blend_pixel(surface, x, y, color);
+            if (!zsr_round_row_span(inner, radius - i - 1, y, &il, &ir, &i_all)) {
+                zsr_hspan(surface, y, ol, orr, visible, color);
+                continue;
             }
+            if (i_all)
+                continue;
+
+            /* outer minus inner: up to two segments */
+            if (ol < il)
+                zsr_hspan(surface, y, ol, il - 1 < orr ? il - 1 : orr, visible, color);
+            if (orr > ir)
+                zsr_hspan(surface, y, ir + 1 > ol ? ir + 1 : ol, orr, visible, color);
         }
     }
 }
@@ -486,6 +553,19 @@ static void zsr_draw_line_clipped(
     zsr_color_t color
 )
 {
+    int half_t = thickness / 2;
+    int min_x = (x0 < x1 ? x0 : x1) - half_t, max_x = (x0 > x1 ? x0 : x1) + half_t;
+    int min_y = (y0 < y1 ? y0 : y1) - half_t, max_y = (y0 > y1 ? y0 : y1) + half_t;
+    if (max_x < clip.x || min_x >= clip.x + clip.width ||
+        max_y < clip.y || min_y >= clip.y + clip.height)
+        return;
+
+    if (y0 == y1 && thickness <= 1) {
+        if (surface && surface->pixels)
+            zsr_hspan(surface, y0, min_x, max_x, clip, color);
+        return;
+    }
+
     int dx = x1 > x0 ? x1 - x0 : x0 - x1;
     int sx = x0 < x1 ? 1 : -1;
 
@@ -1174,6 +1254,19 @@ static void zsr_execute_command(
     if (zsr_rect_empty(clip))
         return;
 
+    if (command->opcode == ZSR_CMD_TEXT) {
+        int lines = 1, cols = 0, max_cols = 0;
+        for (const char *t = command->text; *t; ++t) {
+            if (*t == '\n') { ++lines; cols = 0; continue; }
+            if (++cols > max_cols) max_cols = cols;
+        }
+        int sc = command->text_scale < 1 ? 1 : command->text_scale;
+        zsr_rect_t bounds = zsr_rect_make(command->rect.x, command->rect.y,
+                                          max_cols * FONT_WIDTH * sc, lines * FONT_HEIGHT * sc);
+        if (!zsr_rect_intersects(bounds, clip))
+            return;
+    }
+
     switch (command->opcode) {
     case ZSR_CMD_FILL_RECT:
         zsr_fill_rect_clipped(surface, command->rect, clip, command->color);
@@ -1214,6 +1307,26 @@ static void zsr_execute_region(
     for (uint32_t i = 0; i < list->count; ++i) {
         zsr_execute_command(surface, &list->commands[i], region);
     }
+}
+
+/* Index of the topmost command that paints every pixel of tile opaquely
+ * (everything below it, including the wallpaper, is hidden), or -1. */
+static int zsr_find_occluder(const zsr_command_list_t *list, zsr_rect_t tile)
+{
+    for (int i = (int)list->count - 1; i >= 0; --i) {
+        const zsr_command_t *c = &list->commands[i];
+        bool solid_rect = c->opcode == ZSR_CMD_FILL_RECT ||
+                          (c->opcode == ZSR_CMD_ROUNDED_RECT && c->radius <= 0);
+        if (!solid_rect || ZSR_ALPHA(c->color) != 255)
+            continue;
+
+        zsr_rect_t cover = zsr_rect_clip(c->rect, c->clip);
+        if (tile.x >= cover.x && tile.y >= cover.y &&
+            tile.x + tile.width <= cover.x + cover.width &&
+            tile.y + tile.height <= cover.y + cover.height)
+            return i;
+    }
+    return -1;
 }
 
 /* ============================================================
@@ -2237,10 +2350,17 @@ static void zsr_window_mouse_move(
         window->bounds.height = new_height;
     }
 
-    /* Force full redraw while moving or resizing window:
-     * Guarantees 100% clean background restoration from wallpaper cache,
-     * ZERO ghosting, ZERO tearing, and ZERO horizontal/vertical artifact lines! */
-    damage->full_redraw = true;
+    if (window->resize_right || window->resize_bottom) {
+        damage->full_redraw = true;
+        return;
+    }
+
+    /* Pure move: repaint only the old and new footprint (+margin for the 16px shadow) */
+    const int m = 24;
+    zsr_rect_t old_r = window->previous_bounds;
+    zsr_rect_t new_r = window->bounds;
+    zsr_damage_add(damage, zsr_rect_make(old_r.x - m, old_r.y - m, old_r.width + 2 * m, old_r.height + 2 * m));
+    zsr_damage_add(damage, zsr_rect_make(new_r.x - m, new_r.y - m, new_r.width + 2 * m, new_r.height + 2 * m));
 }
 
 static void zsr_window_mouse_up(zsr_window_state_t *window)
@@ -2331,8 +2451,26 @@ static void zsr_compositor_render_region(
     if (zsr_rect_empty(region))
         return;
 
-    zsr_draw_zarqaa_background_region(surface, region);
-    zsr_execute_region(surface, &compositor->commands, region);
+    /* Tiled so pixels hidden under an opaque fill (e.g. an app's background
+     * over the translucent glass body) are never blended. Output is identical. */
+    const zsr_command_list_t *list = &compositor->commands;
+    const int tile_w = 128, tile_h = 64;
+
+    for (int ty = region.y; ty < region.y + region.height; ty += tile_h) {
+        int th = region.y + region.height - ty < tile_h ? region.y + region.height - ty : tile_h;
+        for (int tx = region.x; tx < region.x + region.width; tx += tile_w) {
+            int tw = region.x + region.width - tx < tile_w ? region.x + region.width - tx : tile_w;
+            zsr_rect_t tile = zsr_rect_make(tx, ty, tw, th);
+
+            int start = zsr_find_occluder(list, tile);
+            if (start < 0) {
+                zsr_draw_zarqaa_background_region(surface, tile);
+                start = 0;
+            }
+            for (uint32_t i = (uint32_t)start; i < list->count; ++i)
+                zsr_execute_command(surface, &list->commands[i], tile);
+        }
+    }
 }
 
 /* Drive the hosted app's on_tick and turn its redraw requests into damage */
