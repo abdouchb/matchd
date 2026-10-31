@@ -317,7 +317,9 @@ static void zsr_blend_pixel(
     uint32_t inv_alpha = 255 - alpha;
     uint32_t rb = (((source & 0x00FF00FF) * alpha + (bg & 0x00FF00FF) * inv_alpha + 0x00800080) >> 8) & 0x00FF00FF;
     uint32_t g  = (((source & 0x0000FF00) * alpha + (bg & 0x0000FF00) * inv_alpha + 0x00008000) >> 8) & 0x0000FF00;
-    *pixel = 0xFF000000 | rb | g;
+    /* Premultiplied "over" alpha; exact /255 so an opaque destination stays 0xFF */
+    uint32_t out_a = alpha + ((((bg >> 24) * inv_alpha + 128) * 257) >> 16);
+    *pixel = (out_a << 24) | rb | g;
 }
 
 static void zsr_fill_rect_clipped(
@@ -1135,30 +1137,10 @@ static zsr_command_t *zsr_command_push(
 
     zsr_command_t *command = &list->commands[list->count++];
 
+    memset(command, 0, sizeof(*command));
     command->opcode = opcode;
-    command->rect = zsr_rect_make(0, 0, 0, 0);
-    command->clip = zsr_rect_make(0, 0, 0, 0);
-
-    command->color = 0;
-    command->color2 = 0;
-
-    command->x0 = 0;
-    command->y0 = 0;
-    command->x1 = 0;
-    command->y1 = 0;
-
-    command->radius = 0;
     command->thickness = 1;
-
-    command->a = (zsr_point_t){0, 0};
-    command->b = (zsr_point_t){0, 0};
-    command->c = (zsr_point_t){0, 0};
-
-    command->text[0] = '\0';
     command->text_scale = 1;
-
-    command->buffer = 0;
-    command->buffer_pitch = 0;
 
     return command;
 }
@@ -1510,6 +1492,8 @@ static void zsr_emit_blit_buffer(
 
 static int g_active_tab_index = 0;
 
+static bool g_win_content_changed = false;
+
 static void zsr_build_zarqaa_window(
     zsr_command_list_t *list,
     zsr_rect_t frame,
@@ -1672,6 +1656,7 @@ static void zsr_build_zarqaa_window(
             if (active_win->on_draw) {
                 active_win->on_draw(active_win);
             }
+            g_win_content_changed = true;
             gapi_set_current_context(NULL);
         }
 
@@ -2203,6 +2188,13 @@ static void zsr_damage_add_no_merge(zsr_damage_t *damage, zsr_rect_t rect)
     }
 }
 
+#define ZSR_LAYER_MARGIN 24
+
+static zsr_rect_t zsr_rect_expand(zsr_rect_t r, int m)
+{
+    return zsr_rect_make(r.x - m, r.y - m, r.width + 2 * m, r.height + 2 * m);
+}
+
 static void zsr_window_mouse_move(
     zsr_window_state_t *window,
     int mouse_x,
@@ -2237,10 +2229,14 @@ static void zsr_window_mouse_move(
         window->bounds.height = new_height;
     }
 
-    /* Force full redraw while moving or resizing window:
-     * Guarantees 100% clean background restoration from wallpaper cache,
-     * ZERO ghosting, ZERO tearing, and ZERO horizontal/vertical artifact lines! */
-    damage->full_redraw = true;
+    if (window->resize_right || window->resize_bottom) {
+        damage->full_redraw = true;
+        return;
+    }
+
+    /* Pure move: margin covers the drop shadow (drawn 16px below the frame) */
+    zsr_damage_add(damage, zsr_rect_expand(window->previous_bounds, ZSR_LAYER_MARGIN));
+    zsr_damage_add(damage, zsr_rect_expand(window->bounds, ZSR_LAYER_MARGIN));
 }
 
 static void zsr_window_mouse_up(zsr_window_state_t *window)
@@ -2318,9 +2314,119 @@ static void zsr_compositor_build_commands(zsr_compositor_t *compositor)
     zsr_build_desktop_dock(&compositor->commands, compositor->backbuffer->width, compositor->backbuffer->height);
 }
 
+/* ------------------------------------------------------------
+   Window layer cache: while a window is dragged its pixels don't
+   change, so it is rendered once into a premultiplied-ARGB layer
+   and each frame only blends that layer at the new position.
+   The layer is re-rendered whenever the window's command list
+   (built in layer-local coordinates) or the app content changes.
+   ------------------------------------------------------------ */
+static uint32_t *g_win_layer = NULL;
+static size_t g_win_layer_cap = 0;
+static int g_win_layer_w = 0;
+static int g_win_layer_h = 0;
+static zsr_command_list_t *g_win_layer_cmds = NULL;
+static zsr_command_list_t *g_win_scratch_cmds = NULL;
+
+static bool zsr_window_layer_update(zsr_rect_t frame)
+{
+    if (!g_win_layer_cmds) {
+        g_win_layer_cmds = (zsr_command_list_t *)kmalloc(sizeof(zsr_command_list_t));
+        g_win_scratch_cmds = (zsr_command_list_t *)kmalloc(sizeof(zsr_command_list_t));
+        if (!g_win_layer_cmds || !g_win_scratch_cmds) {
+            if (g_win_layer_cmds) kfree(g_win_layer_cmds);
+            if (g_win_scratch_cmds) kfree(g_win_scratch_cmds);
+            g_win_layer_cmds = g_win_scratch_cmds = NULL;
+            return false;
+        }
+        g_win_layer_cmds->count = 0;
+    }
+
+    int lw = frame.width + 2 * ZSR_LAYER_MARGIN;
+    int lh = frame.height + 2 * ZSR_LAYER_MARGIN;
+    size_t need = (size_t)lw * lh;
+    bool fresh = false;
+
+    if (need > g_win_layer_cap) {
+        if (g_win_layer) kfree(g_win_layer);
+        g_win_layer = (uint32_t *)kmalloc(need * sizeof(uint32_t));
+        g_win_layer_cap = g_win_layer ? need : 0;
+        if (!g_win_layer) return false;
+        fresh = true;
+    }
+
+    zsr_commands_reset(g_win_scratch_cmds);
+    g_win_content_changed = false;
+    zsr_build_zarqaa_window(
+        g_win_scratch_cmds,
+        zsr_rect_make(ZSR_LAYER_MARGIN, ZSR_LAYER_MARGIN, frame.width, frame.height),
+        false
+    );
+
+    if (!fresh && !g_win_content_changed &&
+        lw == g_win_layer_w && lh == g_win_layer_h &&
+        g_win_scratch_cmds->count == g_win_layer_cmds->count &&
+        memcmp(g_win_scratch_cmds->commands, g_win_layer_cmds->commands,
+               g_win_scratch_cmds->count * sizeof(zsr_command_t)) == 0) {
+        return true;
+    }
+
+    memset(g_win_layer, 0, need * sizeof(uint32_t));
+    zsr_surface_t layer_surf;
+    layer_surf.pixels = g_win_layer;
+    layer_surf.width = lw;
+    layer_surf.height = lh;
+    layer_surf.pitch = lw * (int)sizeof(uint32_t);
+    zsr_execute_region(&layer_surf, g_win_scratch_cmds, zsr_rect_make(0, 0, lw, lh));
+
+    zsr_command_list_t *tmp = g_win_layer_cmds;
+    g_win_layer_cmds = g_win_scratch_cmds;
+    g_win_scratch_cmds = tmp;
+    g_win_layer_w = lw;
+    g_win_layer_h = lh;
+    return true;
+}
+
+static void zsr_composite_window_layer(
+    zsr_surface_t *surface,
+    zsr_rect_t frame,
+    zsr_rect_t clip
+)
+{
+    int ox = frame.x - ZSR_LAYER_MARGIN;
+    int oy = frame.y - ZSR_LAYER_MARGIN;
+    zsr_rect_t vis = zsr_rect_clip(zsr_rect_make(ox, oy, g_win_layer_w, g_win_layer_h), clip);
+    if (zsr_rect_empty(vis))
+        return;
+
+    int dst_stride = surface->pitch / 4;
+    for (int y = vis.y; y < vis.y + vis.height; ++y) {
+        const uint32_t *s = g_win_layer + (size_t)(y - oy) * g_win_layer_w + (vis.x - ox);
+        uint32_t *d = surface->pixels + (size_t)y * dst_stride + vis.x;
+
+        for (int i = 0; i < vis.width; ++i) {
+            uint32_t p = s[i];
+            uint32_t a = p >> 24;
+            if (a == 255) {
+                d[i] = p;
+            } else if (a) {
+                uint32_t inv = 255 - a;
+                uint32_t q = d[i];
+                uint32_t rb = (p & 0x00FF00FF) + ((((q & 0x00FF00FF) * inv + 0x00800080) >> 8) & 0x00FF00FF);
+                uint32_t g  = (p & 0x0000FF00) + ((((q & 0x0000FF00) * inv + 0x00008000) >> 8) & 0x0000FF00);
+                /* Saturate the rare +1 rounding overflow instead of carrying into the next channel */
+                if (rb & 0x01000100) rb |= ((rb & 0x01000100) >> 8) * 0xFF;
+                if (g & 0x00010000) g = 0x0000FF00;
+                d[i] = 0xFF000000 | (rb & 0x00FF00FF) | (g & 0x0000FF00);
+            }
+        }
+    }
+}
+
 static void zsr_compositor_render_region(
     zsr_compositor_t *compositor,
-    zsr_rect_t region
+    zsr_rect_t region,
+    bool use_layer
 )
 {
     zsr_surface_t *surface = compositor->backbuffer;
@@ -2332,6 +2438,8 @@ static void zsr_compositor_render_region(
         return;
 
     zsr_draw_zarqaa_background_region(surface, region);
+    if (use_layer)
+        zsr_composite_window_layer(surface, compositor->main_window.bounds, region);
     zsr_execute_region(surface, &compositor->commands, region);
 }
 
@@ -2363,19 +2471,31 @@ static void zsr_compositor_frame(zsr_compositor_t *compositor)
     if (damage->count == 0 && !damage->full_redraw)
         return;
 
-    zsr_compositor_build_commands(compositor);
+    bool use_layer = g_window_open && !compositor->root &&
+                     compositor->main_window.dragging &&
+                     zsr_window_layer_update(compositor->main_window.bounds);
+
+    if (use_layer) {
+        /* Window comes from the cached layer; only the dock is drawn as commands */
+        zsr_commands_reset(&compositor->commands);
+        zsr_build_desktop_dock(&compositor->commands, surface->width, surface->height);
+    } else {
+        zsr_compositor_build_commands(compositor);
+    }
 
     if (damage->full_redraw) {
         zsr_compositor_render_region(
             compositor,
-            zsr_rect_make(0, 0, surface->width, surface->height)
+            zsr_rect_make(0, 0, surface->width, surface->height),
+            use_layer
         );
         dirty_rect_add(0, 0, surface->width, surface->height);
     } else {
         for (uint32_t i = 0; i < damage->count; ++i) {
             zsr_compositor_render_region(
                 compositor,
-                damage->rects[i]
+                damage->rects[i],
+                use_layer
             );
             dirty_rect_add(damage->rects[i].x, damage->rects[i].y, damage->rects[i].width, damage->rects[i].height);
         }
