@@ -19,6 +19,8 @@
 #include "graphics/render_queue.h"
 #include "graphics/graphics_api.h"
 #include "gui/zb_theme.h"
+#include "kernel/smp.h"
+#include <emmintrin.h>
 
 #define ZSR_NUM_APP_CARDS 19
 #define ZSR_APP_CARD_COLS 4
@@ -329,22 +331,55 @@ static inline void zsr_blend_run(uint32_t *d, int n, zsr_color_t color)
     if (alpha == 0)
         return;
 
+    int i = 0;
     if (alpha >= 255) {
         uint32_t c = color | 0xFF000000;
-        for (int i = 0; i < n; ++i)
+        __m128i vc = _mm_set1_epi32((int)c);
+        for (; i + 4 <= n; i += 4)
+            _mm_storeu_si128((__m128i *)(d + i), vc);
+        for (; i < n; ++i)
             d[i] = c;
         return;
     }
 
+    /* Per channel: (src*alpha + 128 + bg*inv) >> 8, exact in 16-bit lanes
+     * (max 255*255 + 128 < 65536). */
     uint32_t inv_alpha = 255 - alpha;
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i va = _mm_set1_epi16((short)alpha);
+    const __m128i vinv = _mm_set1_epi16((short)inv_alpha);
+    const __m128i vopaque = _mm_set1_epi32((int)0xFF000000);
+    __m128i vsrc = _mm_unpacklo_epi8(_mm_set1_epi32((int)color), zero);
+    vsrc = _mm_add_epi16(_mm_mullo_epi16(vsrc, va), _mm_set1_epi16(128));
+    for (; i + 4 <= n; i += 4) {
+        __m128i px = _mm_loadu_si128((const __m128i *)(d + i));
+        __m128i lo = _mm_srli_epi16(_mm_add_epi16(vsrc, _mm_mullo_epi16(_mm_unpacklo_epi8(px, zero), vinv)), 8);
+        __m128i hi = _mm_srli_epi16(_mm_add_epi16(vsrc, _mm_mullo_epi16(_mm_unpackhi_epi8(px, zero), vinv)), 8);
+        _mm_storeu_si128((__m128i *)(d + i), _mm_or_si128(_mm_packus_epi16(lo, hi), vopaque));
+    }
+
     uint32_t src_rb = (color & 0x00FF00FF) * alpha + 0x00800080;
     uint32_t src_g  = (color & 0x0000FF00) * alpha + 0x00008000;
-    for (int i = 0; i < n; ++i) {
+    for (; i < n; ++i) {
         uint32_t bg = d[i];
         uint32_t rb = ((src_rb + (bg & 0x00FF00FF) * inv_alpha) >> 8) & 0x00FF00FF;
         uint32_t g  = ((src_g  + (bg & 0x0000FF00) * inv_alpha) >> 8) & 0x0000FF00;
         d[i] = 0xFF000000 | rb | g;
     }
+}
+
+/* Copy n pixels (SSE2, unaligned) */
+static inline void zsr_copy_px(uint32_t *dst, const uint32_t *src, size_t n)
+{
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m128i a = _mm_loadu_si128((const __m128i *)(src + i));
+        __m128i b = _mm_loadu_si128((const __m128i *)(src + i + 4));
+        _mm_storeu_si128((__m128i *)(dst + i), a);
+        _mm_storeu_si128((__m128i *)(dst + i + 4), b);
+    }
+    for (; i < n; ++i)
+        dst[i] = src[i];
 }
 
 /* Blend pixels [x0, x1] (inclusive) of row y, clipped to clip and the surface */
@@ -759,7 +794,42 @@ static void zsr_blit_buffer_clipped(
         int dst_row = y * (surface->pitch / 4);
         int src_row = src_y * src_stride;
 
-        for (int x = visible.x; x < visible.x + visible.width; ++x) {
+        int x = visible.x;
+        int x_end = visible.x + visible.width;
+        const __m128i zero = _mm_setzero_si128();
+        const __m128i v255 = _mm_set1_epi32(255);
+        const __m128i w255 = _mm_set1_epi16(255);
+        const __m128i w128 = _mm_set1_epi16(128);
+        const __m128i vopaque = _mm_set1_epi32((int)0xFF000000);
+        for (; x + 4 <= x_end; x += 4) {
+            uint32_t *dp = &surface->pixels[dst_row + x];
+            __m128i px = _mm_loadu_si128((const __m128i *)&src_buffer[src_row + (x - rect.x)]);
+            __m128i a32 = _mm_srli_epi32(px, 24);
+            __m128i opaque = _mm_cmpeq_epi32(a32, v255);
+            __m128i clear = _mm_cmpeq_epi32(a32, zero);
+            if (_mm_movemask_epi8(opaque) == 0xFFFF) {
+                _mm_storeu_si128((__m128i *)dp, px);
+                continue;
+            }
+            if (_mm_movemask_epi8(clear) == 0xFFFF)
+                continue;
+
+            __m128i bg = _mm_loadu_si128((const __m128i *)dp);
+            __m128i plo = _mm_unpacklo_epi8(px, zero), phi = _mm_unpackhi_epi8(px, zero);
+            __m128i blo = _mm_unpacklo_epi8(bg, zero), bhi = _mm_unpackhi_epi8(bg, zero);
+            __m128i alo = _mm_shufflehi_epi16(_mm_shufflelo_epi16(plo, 0xFF), 0xFF);
+            __m128i ahi = _mm_shufflehi_epi16(_mm_shufflelo_epi16(phi, 0xFF), 0xFF);
+            __m128i rlo = _mm_srli_epi16(_mm_add_epi16(_mm_add_epi16(_mm_mullo_epi16(plo, alo),
+                              _mm_mullo_epi16(blo, _mm_sub_epi16(w255, alo))), w128), 8);
+            __m128i rhi = _mm_srli_epi16(_mm_add_epi16(_mm_add_epi16(_mm_mullo_epi16(phi, ahi),
+                              _mm_mullo_epi16(bhi, _mm_sub_epi16(w255, ahi))), w128), 8);
+            __m128i res = _mm_or_si128(_mm_packus_epi16(rlo, rhi), vopaque);
+            res = _mm_or_si128(_mm_and_si128(opaque, px),
+                  _mm_or_si128(_mm_and_si128(clear, bg),
+                               _mm_andnot_si128(_mm_or_si128(opaque, clear), res)));
+            _mm_storeu_si128((__m128i *)dp, res);
+        }
+        for (; x < x_end; ++x) {
             int src_x = x - rect.x;
             uint32_t pixel = src_buffer[src_row + src_x];
             uint32_t a = (pixel >> 24) & 0xFF;
@@ -1452,7 +1522,7 @@ static void zsr_draw_zarqaa_background_region(
         for (int y = visible.y; y < visible.y + visible.height; ++y) {
             uint32_t *src = &g_wallpaper_cache[y * surface->width + visible.x];
             uint32_t *dst = &surface->pixels[y * pitch_pixels + visible.x];
-            memcpy(dst, src, visible.width * sizeof(uint32_t));
+            zsr_copy_px(dst, src, (size_t)visible.width);
         }
         return;
     }
@@ -1486,7 +1556,7 @@ static void zsr_draw_background_folded(
         const uint32_t *wp = wallpaper + (size_t)y * surface->width;
         const uint32_t *tp = tint + (size_t)y * surface->width;
 
-        memcpy(dst + region.x, wp + region.x, (size_t)region.width * 4);
+        zsr_copy_px(dst + region.x, wp + region.x, (size_t)region.width);
 
         if (zsr_rect_empty(visible) || y < visible.y || y >= visible.y + visible.height)
             continue;
@@ -1503,7 +1573,7 @@ static void zsr_draw_background_folded(
             }
         }
         if (l <= r)
-            memcpy(dst + l, tp + l, (size_t)(r - l + 1) * 4);
+            zsr_copy_px(dst + l, tp + l, (size_t)(r - l + 1));
     }
 }
 
@@ -2732,6 +2802,56 @@ static void zsr_compositor_build_commands(zsr_compositor_t *compositor)
     }
 }
 
+typedef struct {
+    zsr_surface_t *surface;
+    const zsr_command_list_t *list;
+    zsr_rect_t region;
+    const uint32_t *tint;   /* non-NULL: first command is folded into the wallpaper */
+    int band_h;
+    int bands;
+    int next_band;
+} zsr_render_job_t;
+
+/* Draw everything for one (already clipped) rectangle */
+static void zsr_render_rect(const zsr_render_job_t *job, zsr_rect_t region)
+{
+    zsr_surface_t *surface = job->surface;
+    const zsr_command_list_t *list = job->list;
+    uint32_t first = 0;
+
+    if (job->tint) {
+        zsr_draw_background_folded(surface, region, &list->commands[0], g_wallpaper_cache, job->tint);
+        first = 1;
+    } else {
+        zsr_draw_zarqaa_background_region(surface, region);
+    }
+
+    for (uint32_t i = first; i < list->count; ++i)
+        zsr_execute_command(surface, &list->commands[i], region);
+}
+
+/* Runs on every CPU: claim horizontal bands until none are left. Bands are
+ * disjoint and the command list is read-only, so no locking is needed. */
+static void zsr_render_worker(void *arg)
+{
+    zsr_render_job_t *job = (zsr_render_job_t *)arg;
+    for (;;) {
+        int b = __atomic_fetch_add(&job->next_band, 1, __ATOMIC_RELAXED);
+        if (b >= job->bands)
+            break;
+        zsr_rect_t band = job->region;
+        band.y += b * job->band_h;
+        if (band.y + job->band_h < job->region.y + job->region.height)
+            band.height = job->band_h;
+        else
+            band.height = job->region.y + job->region.height - band.y;
+        zsr_render_rect(job, band);
+    }
+}
+
+#define ZSR_PARALLEL_MIN_PIXELS 16384
+#define ZSR_BAND_MIN_ROWS 16
+
 static void zsr_compositor_render_region(
     zsr_compositor_t *compositor,
     zsr_rect_t region
@@ -2746,27 +2866,34 @@ static void zsr_compositor_render_region(
         return;
 
     const zsr_command_list_t *list = &compositor->commands;
-    uint32_t first = 0;
+    zsr_render_job_t job = { surface, list, region, NULL, 0, 1, 0 };
 
     if (list->count > 0 && g_wallpaper_cache &&
         g_wallpaper_cache_width == surface->width &&
         g_wallpaper_cache_height == surface->height) {
         const zsr_command_t *c0 = &list->commands[0];
         bool fill = c0->opcode == ZSR_CMD_FILL_RECT || c0->opcode == ZSR_CMD_ROUNDED_RECT;
-        if (fill && ZSR_ALPHA(c0->color) != 0) {
-            const uint32_t *tint = zsr_tinted_wallpaper(c0->color, surface->width, surface->height);
-            if (tint) {
-                zsr_draw_background_folded(surface, region, c0, g_wallpaper_cache, tint);
-                first = 1;
-            }
+        if (fill && ZSR_ALPHA(c0->color) != 0)
+            job.tint = zsr_tinted_wallpaper(c0->color, surface->width, surface->height);
+    }
+
+    int workers = smp_worker_count();
+    if (workers > 0 && (long)region.width * region.height >= ZSR_PARALLEL_MIN_PIXELS) {
+        /* Lazy caches must be filled here, not on an AP */
+        (void)font_get_glyph_alpha_row('A', 0);
+
+        int band_h = (region.height + 4 * (workers + 1) - 1) / (4 * (workers + 1));
+        if (band_h < ZSR_BAND_MIN_ROWS)
+            band_h = ZSR_BAND_MIN_ROWS;
+        job.band_h = band_h;
+        job.bands = (region.height + band_h - 1) / band_h;
+        if (job.bands > 1) {
+            smp_parallel_run(zsr_render_worker, &job);
+            return;
         }
     }
 
-    if (first == 0)
-        zsr_draw_zarqaa_background_region(surface, region);
-
-    for (uint32_t i = first; i < list->count; ++i)
-        zsr_execute_command(surface, &list->commands[i], region);
+    zsr_render_rect(&job, region);
 }
 
 /* Drive the hosted app's on_tick and turn its redraw requests into damage */
