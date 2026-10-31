@@ -35,6 +35,7 @@ static void execute_power_action(enum power_action action) {
 }
 
 static void power_on_mouse(struct window *win, int mx, int my, bool left, bool right) {
+    (void)right;
     if (!left) return;
     struct power_state *state = (struct power_state *)win->user_data;
 

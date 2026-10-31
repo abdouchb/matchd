@@ -47,11 +47,6 @@ struct zv_header {
 
 // A simple pseudo-random number generator for the visualizer
 // To avoid depending on <stdlib.h> in kernel space.
-static unsigned long int z_rand_seed = 1;
-static int z_rand(void) {
-    z_rand_seed = z_rand_seed * 1103515245 + 12345;
-    return (unsigned int)(z_rand_seed / 65536) % 32768;
-}
 
 struct player_state {
     bool is_playing;

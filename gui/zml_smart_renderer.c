@@ -1303,7 +1303,7 @@ static void zsr_pre_render_wallpaper(int width, int height) {
     wallpaper_surf.pitch = width * sizeof(uint32_t);
 
     for (int i = 0; i < width * height; ++i) {
-        g_wallpaper_cache[i] = ZSR_RGBA(15, 23, 42, 255);
+        g_wallpaper_cache[i] = ZSR_RGBA(5, 14, 40, 255);
     }
 
     zsr_rect_t full_screen = zsr_rect_make(0, 0, width, height);
@@ -1315,7 +1315,7 @@ static void zsr_pre_render_wallpaper(int width, int height) {
         width * 10 / 100,
         height * 20 / 100,
         width * 45 / 100,
-        ZSR_RGBA(37, 99, 235, 55)
+        ZSR_RGBA(37, 99, 235, 110)
     );
 
     zsr_draw_glow_region(
@@ -1324,7 +1324,7 @@ static void zsr_pre_render_wallpaper(int width, int height) {
         width * 90 / 100,
         height * 35 / 100,
         width * 45 / 100,
-        ZSR_RGBA(219, 39, 119, 45)
+        ZSR_RGBA(56, 189, 248, 80)
     );
 
     zsr_draw_glow_region(
@@ -1333,7 +1333,7 @@ static void zsr_pre_render_wallpaper(int width, int height) {
         width * 80 / 100,
         height * 90 / 100,
         width * 40 / 100,
-        ZSR_RGBA(245, 158, 11, 35)
+        ZSR_RGBA(14, 116, 220, 90)
     );
 
     zsr_draw_glow_region(
@@ -1342,7 +1342,7 @@ static void zsr_pre_render_wallpaper(int width, int height) {
         width * 20 / 100,
         height * 80 / 100,
         width * 45 / 100,
-        ZSR_RGBA(79, 70, 229, 45)
+        ZSR_RGBA(59, 130, 246, 85)
     );
 }
 
@@ -1541,7 +1541,7 @@ static void zsr_build_zarqaa_window(
         frame,
         16,
         screen_clip,
-        ZSR_RGBA(255, 255, 255, 34)
+        ZSR_RGBA(120, 175, 255, 40)
     );
 
     /* 3. Subtle White Border */
@@ -1551,7 +1551,7 @@ static void zsr_build_zarqaa_window(
         16,
         1,
         screen_clip,
-        ZSR_RGBA(255, 255, 255, 58)
+        ZSR_RGBA(140, 195, 255, 100)
     );
 
     /* 4. Top Highlight Line */
@@ -1613,7 +1613,7 @@ static void zsr_build_zarqaa_window(
         snprintf(title_buf, sizeof(title_buf), "%s  |  %u FPS  |  VSync: %s [F8]",
                  active_win->title, gui_get_fps(), fb_get_vsync() ? "ON" : "OFF (Uncapped)");
     } else {
-        snprintf(title_buf, sizeof(title_buf), "ZarqaaOS QuantumPeak  |  %u FPS  |  VSync: %s [F8]",
+        snprintf(title_buf, sizeof(title_buf), "Zarqaa Blue  |  %u FPS  |  VSync: %s [F8]",
                  gui_get_fps(), fb_get_vsync() ? "ON" : "OFF (Uncapped)");
     }
     zsr_emit_text(list, frame.x + 46, frame.y + 16, title_buf, 1, screen_clip, ZSR_RGBA(255, 255, 255, 220));
@@ -1746,7 +1746,7 @@ static void zsr_build_zarqaa_window(
                     tab_rect,
                     14,
                     screen_clip,
-                    ZSR_RGBA(0, 0, 0, 78)
+                    ZSR_RGBA(37, 99, 235, 190)
                 );
             }
 
@@ -1787,11 +1787,11 @@ static void zsr_build_zarqaa_window(
 
         if (g_active_tab_index == 0) {
             /* Tab 0: Desktop & System Status */
-            zsr_emit_text(list, ox, oy, "ZarqaaOS QuantumPeak - System Overview", 1, content_clip, ZSR_RGBA(255, 255, 255, 240));
+            zsr_emit_text(list, ox, oy, "Zarqaa OS Blue - System Overview", 1, content_clip, ZSR_RGBA(255, 255, 255, 240));
             zsr_emit_line(list, ox, oy + 20, ox + frame.width - 48, oy + 20, 1, content_clip, ZSR_RGBA(255, 255, 255, 30));
 
             zsr_rect_t card = zsr_rect_make(ox, oy + 32, frame.width - 48, 160);
-            zsr_emit_rounded_rect(list, card, 12, content_clip, ZSR_RGBA(255, 255, 255, 15));
+            zsr_emit_rounded_rect(list, card, 12, content_clip, ZSR_RGBA(70, 140, 255, 28));
             zsr_emit_border(list, card, 12, 1, content_clip, ZSR_RGBA(255, 255, 255, 30));
 
             zsr_emit_text(list, ox + 16, oy + 48,  "Architecture : x86_64 Higher-Half Direct Map (SMP 2 Cores)", 1, content_clip, ZSR_RGBA(200, 225, 255, 230));
@@ -1833,8 +1833,8 @@ static void zsr_build_zarqaa_window(
                 int cy = oy + 36 + row * (card_h + 14);
 
                 zsr_rect_t c_rect = zsr_rect_make(cx, cy, card_w, card_h);
-                zsr_emit_rounded_rect(list, c_rect, 10, content_clip, ZSR_RGBA(255, 255, 255, 22));
-                zsr_emit_border(list, c_rect, 10, 1, content_clip, ZSR_RGBA(255, 255, 255, 45));
+                zsr_emit_rounded_rect(list, c_rect, 10, content_clip, ZSR_RGBA(70, 140, 255, 34));
+                zsr_emit_border(list, c_rect, 10, 1, content_clip, ZSR_RGBA(130, 190, 255, 70));
 
                 zsr_emit_text(list, cx + 16, cy + 12, app_names[i], 1, content_clip, ZSR_RGBA(255, 255, 255, 240));
                 zsr_emit_text(list, cx + 16, cy + 32, app_descs[i], 1, content_clip, ZSR_RGBA(180, 205, 235, 170));
@@ -1870,7 +1870,7 @@ static void zsr_build_zarqaa_window(
             zsr_rect_t s1 = zsr_rect_make(ox, oy + 32, frame.width - 48, 48);
             zsr_emit_rounded_rect(list, s1, 10, content_clip, ZSR_RGBA(255, 255, 255, 15));
             zsr_emit_border(list, s1, 10, 1, content_clip, ZSR_RGBA(255, 255, 255, 35));
-            zsr_emit_text(list, ox + 16, oy + 46, "Visual Theme: QuantumPeak Dark Glass (Active)", 1, content_clip, ZSR_RGBA(255, 255, 255, 230));
+            zsr_emit_text(list, ox + 16, oy + 46, "Visual Theme: Zarqaa Blue (Active)", 1, content_clip, ZSR_RGBA(255, 255, 255, 230));
 
             zsr_rect_t s2 = zsr_rect_make(ox, oy + 92, frame.width - 48, 48);
             zsr_emit_rounded_rect(list, s2, 10, content_clip, ZSR_RGBA(255, 255, 255, 15));
@@ -2082,7 +2082,8 @@ static void zsr_build_desktop_dock(zsr_command_list_t *list, int screen_width, i
     zsr_rect_t clip = zsr_rect_make(0, 0, 32767, 32767);
     
     // Draw Glass Background
-    zsr_emit_rounded_rect(list, dock_rect, 20, clip, ZSR_RGBA(15, 23, 42, 180));
+    zsr_emit_rounded_rect(list, dock_rect, 20, clip, ZSR_RGBA(8, 28, 72, 205));
+    zsr_emit_border(list, dock_rect, 20, 1, clip, ZSR_RGBA(96, 165, 250, 100));
     
     int start_x = dock_x + 20 + spacing / 2;
     int dock_cy = dock_y + dock_h / 2;
@@ -2126,7 +2127,7 @@ static void zsr_build_desktop_dock(zsr_command_list_t *list, int screen_width, i
         // Draw tooltip
         if (hover) {
             zsr_rect_t tooltip_rect = zsr_rect_make(cx - 40, dock_y - 35, 80, 24);
-            zsr_emit_rounded_rect(list, tooltip_rect, 12, clip, ZSR_RGBA(0, 0, 0, 200));
+            zsr_emit_rounded_rect(list, tooltip_rect, 12, clip, ZSR_RGBA(14, 52, 120, 235));
             zsr_emit_text(list, cx - 20, dock_y - 28, g_zsr_dock_buttons[i].name, 1, clip, ZSR_RGBA(255, 255, 255, 255));
         }
     }
@@ -2854,4 +2855,4 @@ void zsr_add_window(
 
     zsr_add_child(compositor->root, win);
     zsr_request_full_redraw(compositor);
-}
+}

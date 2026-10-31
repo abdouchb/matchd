@@ -11,6 +11,11 @@
 #include "kernel/pci.h"
 #include "drivers/framebuffer.h"
 
+#undef COLOR_TEXT_PRIMARY
+#undef COLOR_TEXT_SECONDARY
+#undef COLOR_ACCENT
+#undef COLOR_SUCCESS
+#undef COLOR_ERROR
 #define COLOR_TEXT_PRIMARY 0xFFE0E0E0
 #define COLOR_TEXT_SECONDARY 0xFFA0A0A0
 #define COLOR_ACCENT 0xFF007ACC
