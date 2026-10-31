@@ -8,7 +8,7 @@ if not defined MSYS_BASH set "MSYS_BASH=C:\Users\ipiou\Downloads\msys64\usr\bin\
 echo ===================================================
 echo [1/2] Compiling Zarqaa OS & Building ISO...
 echo ===================================================
-"%MSYS_BASH%" -l -c "cd \"$(cygpath -u \"$ZARQAA_DIR\")\" && make all"
+"%MSYS_BASH%" -l -c "cd \"$(cygpath -u \"$ZARQAA_DIR\")\" && ./tools/build_iso.sh --no-publish"
 
 if %ERRORLEVEL% NEQ 0 (
     echo [ERROR] Build failed! Check compiler messages above.
