@@ -74,7 +74,7 @@ static void quantum_viewer_on_close(struct window *win) {
 }
 
 struct window *quantum_viewer_open(void) {
-    struct window *win = wm_create_window("QuantumPeak HTML Engine", 50, 50, 800, 600);
+    struct window *win = wm_create_window("QuantumPeak HTML Engine", 50, 50, 800, 530);
     if (!win) return NULL;
 
     struct quantum_viewer_state *state = kcalloc(1, sizeof(struct quantum_viewer_state));

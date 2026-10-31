@@ -9,7 +9,7 @@ void browser_on_key(struct window *win, char key, uint8_t scancode);
 void browser_on_close(struct window *win);
 
 void browser_open_url(const char *url) {
-    struct window *win = wm_create_window("Zarqaa Browser", 100, 100, 800, 600);
+    struct window *win = wm_create_window("Zarqaa Browser", 100, 100, 800, 530);
     if (!win) return;
     
     browser_init(win);

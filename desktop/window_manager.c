@@ -183,6 +183,17 @@ struct window *wm_get_focused(void) {
     return &windows[z_order[window_count - 1]];
 }
 
+struct window *wm_focus_top_visible(void) {
+    for (int i = window_count - 1; i >= 0; i--) {
+        struct window *w = &windows[z_order[i]];
+        if (w->visible && !w->minimized) {
+            wm_focus_window(w);
+            return w;
+        }
+    }
+    return NULL;
+}
+
 struct window *wm_find_window_by_title(const char *title) {
     for (int i = 0; i < window_count; i++) {
         struct window *win = &windows[z_order[i]];

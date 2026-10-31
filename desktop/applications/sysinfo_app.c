@@ -69,7 +69,11 @@ static void si_on_draw(struct window *win) {
     row(y, "Uptime", buf); y += 24;
     snprintf(buf, sizeof(buf), "%d", wm_get_window_count());
     row(y, "Open windows", buf); y += 24;
-    row(y, "Theme", "Zarqaa Blue");
+    row(y, "Theme", "Zarqaa Blue"); y += 24;
+    extern uint32_t gui_get_fps(void);
+    extern bool fb_get_vsync(void);
+    snprintf(buf, sizeof(buf), "%u FPS, VSync %s", (unsigned)gui_get_fps(), fb_get_vsync() ? "on" : "off");
+    row(y, "Frame rate", buf);
 }
 
 static void si_on_tick(struct window *win) {

@@ -33,6 +33,7 @@ void gapi_context_init(render_context_t *ctx);
 /* Set the active context for wrappers (used by window_manager) */
 void gapi_set_current_context(render_context_t *ctx);
 render_context_t *gapi_get_current_context(void);
+void gapi_set_immediate(bool on);
 
 /* 
  * The Unified Graphics API

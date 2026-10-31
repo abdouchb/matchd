@@ -5,6 +5,7 @@
 #include "graphics/graphics_api.h"
 #include "graphics/render_queue.h"
 #include "drivers/framebuffer.h"
+#include "drivers/font.h"
 #include "zarqaa/string.h"
 
 void gapi_context_init(render_context_t *ctx) {
@@ -34,11 +35,16 @@ void gapi_set_current_context(render_context_t *ctx) {
     g_active_context = ctx;
 }
 
+/* Immediate mode: draw straight into the current render target instead of queueing */
+static bool g_immediate = false;
+void gapi_set_immediate(bool on) { g_immediate = on; }
+
 render_context_t *gapi_get_current_context(void) {
     return g_active_context;
 }
 
 void gapi_fill_rect(render_context_t *ctx, int x, int y, int w, int h, color_t color) {
+    if (g_immediate) { fb_fill_rect_internal(x, y, w, h, color); return; }
     if (!ctx) ctx = g_active_context;
     RenderQueue *q = ctx ? ctx->queue : &g_default_render_queue;
     RenderCommand *cmd = render_queue_push(q);
@@ -51,6 +57,7 @@ void gapi_fill_rect(render_context_t *ctx, int x, int y, int w, int h, color_t c
 }
 
 void gapi_draw_rect(render_context_t *ctx, int x, int y, int w, int h, color_t color) {
+    if (g_immediate) { fb_draw_rect_internal(x, y, w, h, color); return; }
     if (!ctx) ctx = g_active_context;
     RenderQueue *q = ctx ? ctx->queue : &g_default_render_queue;
     RenderCommand *cmd = render_queue_push(q);
@@ -63,6 +70,7 @@ void gapi_draw_rect(render_context_t *ctx, int x, int y, int w, int h, color_t c
 }
 
 void gapi_draw_line(render_context_t *ctx, int x0, int y0, int x1, int y1, color_t color) {
+    if (g_immediate) { fb_draw_line_internal(x0, y0, x1, y1, color); return; }
     if (!ctx) ctx = g_active_context;
     RenderQueue *q = ctx ? ctx->queue : &g_default_render_queue;
     RenderCommand *cmd = render_queue_push(q);
@@ -75,6 +83,7 @@ void gapi_draw_line(render_context_t *ctx, int x0, int y0, int x1, int y1, color
 }
 
 void gapi_draw_string(render_context_t *ctx, int x, int y, const char *s, color_t fg, color_t bg) {
+    if (g_immediate) { fb_draw_string_aa_clipped(x, y, s, fg, NULL); (void)bg; return; }
     if (!ctx) ctx = g_active_context;
     RenderQueue *q = ctx ? ctx->queue : &g_default_render_queue;
     RenderCommand *cmd = render_queue_push(q);
@@ -89,6 +98,7 @@ void gapi_draw_string(render_context_t *ctx, int x, int y, const char *s, color_
 }
 
 void gapi_draw_string_transparent(render_context_t *ctx, int x, int y, const char *s, color_t fg) {
+    if (g_immediate) { fb_draw_string_aa_clipped(x, y, s, fg, NULL); return; }
     if (!ctx) ctx = g_active_context;
     RenderQueue *q = ctx ? ctx->queue : &g_default_render_queue;
     RenderCommand *cmd = render_queue_push(q);
@@ -103,6 +113,18 @@ void gapi_draw_string_transparent(render_context_t *ctx, int x, int y, const cha
 }
 
 void gapi_draw_image(render_context_t *ctx, int x, int y, int w, int h, uint32_t *pixels) {
+    if (g_immediate) {
+        for (int j = 0; j < h; j++)
+            for (int i = 0; i < w; i++) {
+                uint32_t px = pixels[j * w + i];
+                uint8_t a = px >> 24;
+                if (a == 255) fb_putpixel(x + i, y + j, px);
+                else if (a) fb_putpixel(x + i, y + j, ((px & 0xFF) * a + (fb_getpixel(x + i, y + j) & 0xFF) * (255 - a)) / 255
+                    | ((((px >> 8) & 0xFF) * a + ((fb_getpixel(x + i, y + j) >> 8) & 0xFF) * (255 - a)) / 255) << 8
+                    | ((((px >> 16) & 0xFF) * a + ((fb_getpixel(x + i, y + j) >> 16) & 0xFF) * (255 - a)) / 255) << 16);
+            }
+        return;
+    }
     if (!ctx) ctx = g_active_context;
     RenderQueue *q = ctx ? ctx->queue : &g_default_render_queue;
     RenderCommand *cmd = render_queue_push(q);

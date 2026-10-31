@@ -92,6 +92,9 @@ static void calc_on_draw(struct window *win) {
     // Fill window background
     fb_fill_rect(0, 0, win->width, win->height, 0xFF0D1925);
     
+    // Display plate behind the readout
+    gfx_draw_rounded_rect_filled(10, 32, 280, 44, 10, 0xFF07111B);
+
     // Let ZUI draw all its widgets
     zui_widget_draw(&state->zui_win->base, 0, 0);
 }

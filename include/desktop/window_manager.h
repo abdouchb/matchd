@@ -52,6 +52,7 @@ void wm_destroy_window(struct window *win);
 bool wm_update(bool left_clicked);
 void wm_render(void);
 struct window *wm_get_focused(void);
+struct window *wm_focus_top_visible(void);
 struct window *wm_find_window_by_title(const char *title);
 void wm_focus_window(struct window *win);
 int wm_get_window_count(void);

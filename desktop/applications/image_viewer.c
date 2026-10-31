@@ -164,7 +164,7 @@ static void iv_on_close(struct window *win) {
 
 struct window *image_viewer_open_file(const char *path) {
     int w = 800;
-    int h = 600;
+    int h = 530;
     if (fb_get_width() < 800) w = fb_get_width() - 40;
     if (fb_get_height() < 600) h = fb_get_height() - 40;
 

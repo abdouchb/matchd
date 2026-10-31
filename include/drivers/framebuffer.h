@@ -32,6 +32,8 @@ void fb_draw_rect_internal(int x, int y, int w, int h, color_t color);
 void fb_draw_line_internal(int x0, int y0, int x1, int y1, color_t color);
 void fb_draw_string_internal(int x, int y, const char *s, color_t fg, color_t bg);
 void fb_draw_string_transparent_internal(int x, int y, const char *s, color_t fg);
+void fb_set_base_target(uint32_t *buffer, int w, int h, int p);
+const uint8_t *fb_ttf_glyph(char c, int *w, int *h, int *xoff, int *yoff, int *adv);
 
 int fb_get_width(void);
 int fb_get_height(void);

@@ -13,7 +13,7 @@
 #include "drivers/usb/usb_hid.h"
 
 #define CANVAS_W 700
-#define CANVAS_H 450
+#define CANVAS_H 400
 #define UI_LEFT_BAR_W 60
 #define UI_TOP_BAR_H 70
 #define CANVAS_X (UI_LEFT_BAR_W + 20)
@@ -465,7 +465,7 @@ static void paint_on_close(struct window *win) {
 }
 
 struct window *paint_open(void) {
-    struct window *win = wm_create_window("Zarqaa Studio", 50, 20, 800, 600);
+    struct window *win = wm_create_window("Zarqaa Studio", 50, 20, 800, 510);
     if (!win) return NULL;
 
     struct paint_state *state = kcalloc(1, sizeof(struct paint_state));

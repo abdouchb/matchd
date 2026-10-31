@@ -103,11 +103,37 @@ void fb_set_render_target(uint32_t *buffer, int w, int h, int p) {
     current_rt_pitch = p;
 }
 
+/* Optional redirect: while set, "reset" returns to this buffer instead of the screen */
+static uint32_t *rt_base_buffer;
+static int rt_base_w, rt_base_h, rt_base_p;
+
+void fb_set_base_target(uint32_t *buffer, int w, int h, int p) {
+    rt_base_buffer = buffer;
+    rt_base_w = w; rt_base_h = h; rt_base_p = p;
+    fb_reset_render_target();
+}
+
 void fb_reset_render_target(void) {
+    if (rt_base_buffer) {
+        current_rt_buffer = rt_base_buffer;
+        current_rt_width = rt_base_w;
+        current_rt_height = rt_base_h;
+        current_rt_pitch = rt_base_p;
+        return;
+    }
     current_rt_buffer = backbuffer;
     current_rt_width = width;
     current_rt_height = height;
     current_rt_pitch = pitch;
+}
+
+/* Glyph accessor for the baked TTF atlas; bitmap rows are FONT_ATLAS_WIDTH bytes apart */
+const uint8_t *fb_ttf_glyph(char c, int *w, int *h, int *xoff, int *yoff, int *adv) {
+    if (c < 32 || c >= 127) c = '?';
+    const baked_char_t *b = &font_cdata[c - 32];
+    *w = b->x1 - b->x0; *h = b->y1 - b->y0;
+    *xoff = b->xoff; *yoff = b->yoff; *adv = b->xadvance;
+    return &font_bitmap[b->y0 * FONT_ATLAS_WIDTH + b->x0];
 }
 
 color_t fb_getpixel(int x, int y) {

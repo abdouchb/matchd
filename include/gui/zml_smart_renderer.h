@@ -156,7 +156,13 @@ typedef enum {
     ZSR_CMD_LINE,
     ZSR_CMD_TRIANGLE,
     ZSR_CMD_TEXT,
-    ZSR_CMD_BLIT_BUFFER
+    ZSR_CMD_BLIT_BUFFER,
+    ZSR_CMD_AA_ROUNDED,   /* anti-aliased rounded rect / circle fill */
+    ZSR_CMD_AA_RING,      /* anti-aliased rounded border */
+    ZSR_CMD_AA_LINE,      /* anti-aliased line, round caps */
+    ZSR_CMD_SHADOW,       /* soft drop shadow, drawn outside rect only */
+    ZSR_CMD_TTF_TEXT,     /* proportional baked-TTF text */
+    ZSR_CMD_RING_GAP      /* circular ring with a notch at the top (power glyph) */
 } zsr_opcode_t;
 
 typedef struct {

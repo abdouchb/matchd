@@ -121,39 +121,18 @@ static bool g_glyph_aa_ready = false;
 void font_build_glyph_aa_cache(void) {
     if (g_glyph_aa_ready) return;
 
+    /* Horizontal [1 2 1] smoothing of the 2px VGA stems: regular weight, soft edges */
     for (int c = 0; c < GLYPH_CACHE_CHARS; ++c) {
         const uint8_t *glyph = font_get_glyph((char)c);
 
         for (int y = 0; y < FONT_HEIGHT; ++y) {
             uint8_t row = glyph[y];
             for (int x = 0; x < FONT_WIDTH; ++x) {
-                int set = (row & (1 << (FONT_WIDTH - 1 - x))) != 0;
-
-                if (set) {
-                    g_glyph_aa_cache[c][y][x] = 255;
-                    continue;
-                }
-
-                /* 3x3 Neighborhood Filtering */
-                int neighbors = 0;
-                for (int oy = -1; oy <= 1; ++oy) {
-                    int yy = y + oy;
-                    if (yy < 0 || yy >= FONT_HEIGHT) continue;
-                    uint8_t nrow = glyph[yy];
-
-                    for (int ox = -1; ox <= 1; ++ox) {
-                        int xx = x + ox;
-                        if (xx < 0 || xx >= FONT_WIDTH) continue;
-                        if (ox == 0 && oy == 0) continue;
-
-                        if (nrow & (1 << (FONT_WIDTH - 1 - xx))) {
-                            neighbors += (ox == 0 || oy == 0) ? 2 : 1;
-                        }
-                    }
-                }
-
-                uint32_t alpha_val = neighbors * 22;
-                g_glyph_aa_cache[c][y][x] = (alpha_val > 255) ? 255 : (uint8_t)alpha_val;
+                int l = (x > 0) && (row & (1 << (FONT_WIDTH - x)));
+                int m = (row & (1 << (FONT_WIDTH - 1 - x))) != 0;
+                int r = (x < FONT_WIDTH - 1) && (row & (1 << (FONT_WIDTH - 2 - x)));
+                int a = (l + 2 * m + r) * 255 / 4;
+                g_glyph_aa_cache[c][y][x] = (uint8_t)(a * 15 / 16);
             }
         }
     }

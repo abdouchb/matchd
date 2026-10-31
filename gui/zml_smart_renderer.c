@@ -18,6 +18,7 @@
 #include "desktop/window_manager.h"
 #include "graphics/render_queue.h"
 #include "graphics/graphics_api.h"
+#include "gui/zb_theme.h"
 
 #define ZSR_NUM_APP_CARDS 19
 #define ZSR_APP_CARD_COLS 4
@@ -1217,6 +1218,13 @@ static zsr_command_t *zsr_command_push(
     return command;
 }
 
+static void zsr_aa_rrect_clipped(zsr_surface_t *s, zsr_rect_t R, int r, zsr_rect_t clip, zsr_color_t color);
+static void zsr_aa_ring_clipped(zsr_surface_t *s, zsr_rect_t R, int r, int t, zsr_rect_t clip, zsr_color_t color);
+static void zsr_aa_line_clipped(zsr_surface_t *s, int x0, int y0, int x1, int y1, int t, zsr_rect_t clip, zsr_color_t color);
+static void zsr_shadow_clipped(zsr_surface_t *s, zsr_rect_t R, int r, int blur, int dy, zsr_rect_t clip, zsr_color_t color);
+static void zsr_ttf_draw_clipped(zsr_surface_t *s, int x, int y, const char *t, zsr_rect_t clip, zsr_color_t color);
+static void zsr_ring_gap_clipped(zsr_surface_t *s, zsr_rect_t R, int t, int gap, zsr_rect_t clip, zsr_color_t color);
+
 static void zsr_execute_command(
     zsr_surface_t *surface,
     const zsr_command_t *command,
@@ -1268,6 +1276,25 @@ static void zsr_execute_command(
 
     case ZSR_CMD_BLIT_BUFFER:
         zsr_blit_buffer_clipped(surface, command->rect, command->buffer, command->buffer_pitch, clip);
+        break;
+
+    case ZSR_CMD_AA_ROUNDED:
+        zsr_aa_rrect_clipped(surface, command->rect, command->radius, clip, command->color);
+        break;
+    case ZSR_CMD_AA_RING:
+        zsr_aa_ring_clipped(surface, command->rect, command->radius, command->thickness, clip, command->color);
+        break;
+    case ZSR_CMD_AA_LINE:
+        zsr_aa_line_clipped(surface, command->x0, command->y0, command->x1, command->y1, command->thickness, clip, command->color);
+        break;
+    case ZSR_CMD_SHADOW:
+        zsr_shadow_clipped(surface, command->rect, command->radius, command->thickness, command->y0, clip, command->color);
+        break;
+    case ZSR_CMD_TTF_TEXT:
+        zsr_ttf_draw_clipped(surface, command->rect.x, command->rect.y, command->text, clip, command->color);
+        break;
+    case ZSR_CMD_RING_GAP:
+        zsr_ring_gap_clipped(surface, command->rect, command->thickness, command->x0, clip, command->color);
         break;
     }
 }
@@ -1640,7 +1667,416 @@ static void zsr_emit_blit_buffer(
    10) CANONICAL ZARQAA DESKTOP WINDOW BUILDER
    ============================================================ */
 
+/* ============================================================
+   UI POLISH LAYER: AA shapes, soft shadow, TTF text, chrome helpers
+   (self-contained: does not depend on the low-level span helpers)
+   ============================================================ */
+
+#define ZSR_TOPBAR_H        30
+#define ZSR_WIN_PAD         8
+#define ZSR_CHROME_RADIUS   14
+#define ZSR_SHADOW_BLUR     22
+#define ZSR_SHADOW_DY       8
+#define ZSR_TTF_SIZE        16
+#define ZSR_DIV255(v)       ((((v) + 128) * 257) >> 16)
+
+static int g_mouse_x = -1;
+static int g_mouse_y = -1;
+static zsr_rect_t g_old_mouse_rect = {0, 0, 0, 0};
+static bool g_window_open = false; /* Start with an empty, clean desktop! */
+static int g_screen_w = 1280;
+static int g_screen_h = 720;
+
+static uint32_t zsr_isqrt32(uint32_t v)
+{
+    uint32_t r = 0, b = 1u << 30;
+    while (b > v) b >>= 2;
+    while (b) {
+        if (v >= r + b) { v -= r + b; r = (r >> 1) + b; }
+        else r >>= 1;
+        b >>= 2;
+    }
+    return r;
+}
+
+static inline uint32_t zsr_px_over(uint32_t dst, zsr_color_t c, int a)
+{
+    if (a <= 0) return dst;
+    if (a >= 255) return 0xFF000000u | (c & 0x00FFFFFFu);
+    uint32_t ia = 255 - a;
+    uint32_t rb = (((c & 0x00FF00FFu) * a + (dst & 0x00FF00FFu) * ia + 0x00800080u) >> 8) & 0x00FF00FFu;
+    uint32_t g  = (((c & 0x0000FF00u) * a + (dst & 0x0000FF00u) * ia + 0x00008000u) >> 8) & 0x0000FF00u;
+    return 0xFF000000u | rb | g;
+}
+
+static void zsr_span_over(uint32_t *d, int n, zsr_color_t c, int a)
+{
+    if (n <= 0 || a <= 0) return;
+    if (a >= 255) {
+        uint32_t v = 0xFF000000u | (c & 0x00FFFFFFu);
+        for (int i = 0; i < n; ++i) d[i] = v;
+        return;
+    }
+    uint32_t sr = (c & 0x00FF00FFu) * a, sg = (c & 0x0000FF00u) * a, ia = 255 - a;
+    for (int i = 0; i < n; ++i) {
+        uint32_t bg = d[i];
+        uint32_t rb = ((sr + (bg & 0x00FF00FFu) * ia + 0x00800080u) >> 8) & 0x00FF00FFu;
+        uint32_t g  = ((sg + (bg & 0x0000FF00u) * ia + 0x00008000u) >> 8) & 0x0000FF00u;
+        d[i] = 0xFF000000u | rb | g;
+    }
+}
+
+/* Coverage (0..255) of pixel (x,y) inside rounded rect R with corner radius r */
+static int zsr_rr_cov(int x, int y, zsr_rect_t R, int r)
+{
+    if (x < R.x || y < R.y || x >= R.x + R.width || y >= R.y + R.height) return 0;
+    int cx, cy;
+    if (x < R.x + r) cx = R.x + r;
+    else if (x >= R.x + R.width - r) cx = R.x + R.width - r;
+    else return 255;
+    if (y < R.y + r) cy = R.y + r;
+    else if (y >= R.y + R.height - r) cy = R.y + R.height - r;
+    else return 255;
+    int dx = cx * 4 - (x * 4 + 2); if (dx < 0) dx = -dx;
+    int dy = cy * 4 - (y * 4 + 2); if (dy < 0) dy = -dy;
+    int d = (int)zsr_isqrt32((uint32_t)(dx * dx + dy * dy)) - r * 4;
+    int cov = (2 - d) * 64;
+    return cov < 0 ? 0 : (cov > 255 ? 255 : cov);
+}
+
+static zsr_rect_t zsr_aa_visible(zsr_surface_t *s, zsr_rect_t R, zsr_rect_t clip)
+{
+    return zsr_rect_clip(R, zsr_rect_clip(clip, zsr_rect_make(0, 0, s->width, s->height)));
+}
+
+static int zsr_clamp_radius(zsr_rect_t R, int r)
+{
+    if (r * 2 > R.width) r = R.width / 2;
+    if (r * 2 > R.height) r = R.height / 2;
+    return r < 0 ? 0 : r;
+}
+
+static void zsr_aa_rrect_clipped(zsr_surface_t *s, zsr_rect_t R, int r, zsr_rect_t clip, zsr_color_t color)
+{
+    int a0 = ZSR_ALPHA(color);
+    zsr_rect_t v = zsr_aa_visible(s, R, clip);
+    if (!a0 || zsr_rect_empty(v)) return;
+    r = zsr_clamp_radius(R, r);
+    int stride = s->pitch / 4;
+    int ls = R.x + r, rs = R.x + R.width - r;
+    for (int y = v.y; y < v.y + v.height; ++y) {
+        uint32_t *row = s->pixels + (size_t)y * stride;
+        int xa = v.x, xb = v.x + v.width;
+        if (y < R.y + r || y >= R.y + R.height - r) {
+            int e = xb < ls ? xb : ls;
+            for (int x = xa; x < e; ++x)
+                row[x] = zsr_px_over(row[x], color, ZSR_DIV255(a0 * zsr_rr_cov(x, y, R, r)));
+            int b = xa > rs ? xa : rs;
+            for (int x = b; x < xb; ++x)
+                row[x] = zsr_px_over(row[x], color, ZSR_DIV255(a0 * zsr_rr_cov(x, y, R, r)));
+            int ms = xa > ls ? xa : ls, me = xb < rs ? xb : rs;
+            if (me > ms) zsr_span_over(row + ms, me - ms, color, a0);
+        } else {
+            zsr_span_over(row + xa, xb - xa, color, a0);
+        }
+    }
+}
+
+static void zsr_ring_pixels(uint32_t *row, int y, int xs, int xe, zsr_rect_t R, int r,
+                            zsr_rect_t I, int ri, zsr_color_t c, int a0)
+{
+    for (int x = xs; x < xe; ++x) {
+        int cov = zsr_rr_cov(x, y, R, r) - zsr_rr_cov(x, y, I, ri);
+        if (cov > 0) row[x] = zsr_px_over(row[x], c, ZSR_DIV255(a0 * cov));
+    }
+}
+
+static void zsr_aa_ring_clipped(zsr_surface_t *s, zsr_rect_t R, int r, int t, zsr_rect_t clip, zsr_color_t color)
+{
+    int a0 = ZSR_ALPHA(color);
+    zsr_rect_t v = zsr_aa_visible(s, R, clip);
+    if (!a0 || t < 1 || zsr_rect_empty(v)) return;
+    r = zsr_clamp_radius(R, r);
+    zsr_rect_t I = zsr_rect_make(R.x + t, R.y + t, R.width - 2 * t, R.height - 2 * t);
+    int ri = r > t ? r - t : 0;
+    int band = r > t ? r : t;
+    int stride = s->pitch / 4;
+    int right = R.x + R.width;
+    for (int y = v.y; y < v.y + v.height; ++y) {
+        uint32_t *row = s->pixels + (size_t)y * stride;
+        int xa = v.x, xb = v.x + v.width;
+        bool edge = y < R.y + band || y >= R.y + R.height - band;
+        bool thick = y < R.y + t || y >= R.y + R.height - t;
+        if (edge) {
+            int l1 = R.x + band, r0 = right - band;
+            int e = xb < l1 ? xb : l1;
+            zsr_ring_pixels(row, y, xa, e, R, r, I, ri, color, a0);
+            int b = xa > r0 ? xa : r0;
+            zsr_ring_pixels(row, y, b, xb, R, r, I, ri, color, a0);
+            if (thick) {
+                int ms = xa > l1 ? xa : l1, me = xb < r0 ? xb : r0;
+                if (me > ms) zsr_span_over(row + ms, me - ms, color, a0);
+            }
+        } else {
+            int e = xb < R.x + t ? xb : R.x + t;
+            if (e > xa) zsr_span_over(row + xa, e - xa, color, a0);
+            int b = xa > right - t ? xa : right - t;
+            if (xb > b) zsr_span_over(row + b, xb - b, color, a0);
+        }
+    }
+}
+
+/* Endpoints are pixel-centre coordinates; t is the line width in pixels */
+static void zsr_aa_line_clipped(zsr_surface_t *s, int x0, int y0, int x1, int y1, int t,
+                                zsr_rect_t clip, zsr_color_t color)
+{
+    int a0 = ZSR_ALPHA(color);
+    int minx = x0 < x1 ? x0 : x1, maxx = x0 < x1 ? x1 : x0;
+    int miny = y0 < y1 ? y0 : y1, maxy = y0 < y1 ? y1 : y0;
+    zsr_rect_t bb = zsr_rect_make(minx - t - 1, miny - t - 1, maxx - minx + 2 * t + 3, maxy - miny + 2 * t + 3);
+    zsr_rect_t v = zsr_aa_visible(s, bb, clip);
+    if (!a0 || zsr_rect_empty(v) || maxx - minx > 400 || maxy - miny > 400) return;
+    int ax = x0 * 4 + 2, ay = y0 * 4 + 2, vx = (x1 - x0) * 4, vy = (y1 - y0) * 4;
+    int len2 = vx * vx + vy * vy, half = t * 2, stride = s->pitch / 4;
+    for (int y = v.y; y < v.y + v.height; ++y) {
+        uint32_t *row = s->pixels + (size_t)y * stride;
+        for (int x = v.x; x < v.x + v.width; ++x) {
+            int wx = x * 4 + 2 - ax, wy = y * 4 + 2 - ay;
+            int dx = wx, dy = wy;
+            if (len2 > 0) {
+                int num = wx * vx + wy * vy;
+                if (num < 0) num = 0;
+                if (num > len2) num = len2;
+                dx = wx - vx * num / len2;
+                dy = wy - vy * num / len2;
+            }
+            int d = (int)zsr_isqrt32((uint32_t)(dx * dx + dy * dy));
+            int cov = (half + 2 - d) * 64;
+            if (cov <= 0) continue;
+            if (cov > 255) cov = 255;
+            row[x] = zsr_px_over(row[x], color, ZSR_DIV255(a0 * cov));
+        }
+    }
+}
+
+/* Ring (outer square box R, thickness t) with a gap of +-gap px centred at the top */
+static void zsr_ring_gap_clipped(zsr_surface_t *s, zsr_rect_t R, int t, int gap,
+                                 zsr_rect_t clip, zsr_color_t color)
+{
+    int a0 = ZSR_ALPHA(color);
+    zsr_rect_t v = zsr_aa_visible(s, R, clip);
+    if (!a0 || zsr_rect_empty(v)) return;
+    int cx4 = R.x * 4 + R.width * 2, cy4 = R.y * 4 + R.height * 2;
+    int ro = R.width * 2, ri = ro - t * 4, stride = s->pitch / 4;
+    for (int y = v.y; y < v.y + v.height; ++y) {
+        uint32_t *row = s->pixels + (size_t)y * stride;
+        for (int x = v.x; x < v.x + v.width; ++x) {
+            int dx = x * 4 + 2 - cx4, dy = y * 4 + 2 - cy4;
+            int d = (int)zsr_isqrt32((uint32_t)(dx * dx + dy * dy));
+            int co = (ro + 2 - d) * 64, ci = (d - ri + 2) * 64;
+            int cov = co < ci ? co : ci;
+            if (dy < 0) {
+                int adx = dx < 0 ? -dx : dx;
+                int g = (adx - gap * 4 + 2) * 64;
+                if (g < cov) cov = g;
+            }
+            if (cov <= 0) continue;
+            if (cov > 255) cov = 255;
+            row[x] = zsr_px_over(row[x], color, ZSR_DIV255(a0 * cov));
+        }
+    }
+}
+
+/* Soft shadow of rounded rect R (shifted down by dy), painted only outside R */
+static void zsr_shadow_clipped(zsr_surface_t *s, zsr_rect_t R, int r, int blur, int dy,
+                               zsr_rect_t clip, zsr_color_t color)
+{
+    int peak = ZSR_ALPHA(color);
+    if (blur < 2 || blur > 64) return;
+    zsr_rect_t bb = zsr_rect_make(R.x - blur / 2 - 1, R.y + dy - blur / 2 - 1,
+                                  R.width + blur + 2, R.height + blur + 2);
+    zsr_rect_t v = zsr_aa_visible(s, bb, clip);
+    if (!peak || zsr_rect_empty(v)) return;
+    r = zsr_clamp_radius(R, r);
+
+    int lut[2 * 64 + 1];
+    int span = 2 * blur;
+    for (int i = 0; i <= span; ++i) {
+        int u = span - i;                       /* 1 at the core, 0 at the tail */
+        lut[i] = peak * u * u / (span * span);
+    }
+    int scx2 = 2 * R.x + R.width, scy2 = 2 * (R.y + dy) + R.height;
+    int hw2 = R.width, hh2 = R.height, r2 = 2 * r;
+    int stride = s->pitch / 4, right = R.x + R.width;
+
+    for (int y = v.y; y < v.y + v.height; ++y) {
+        uint32_t *row = s->pixels + (size_t)y * stride;
+        int xa = v.x, xb = v.x + v.width;
+        int segs[2][2], n = 0;
+        if (y >= R.y + r && y < R.y + R.height - r) {
+            segs[n][0] = xa; segs[n][1] = xb < R.x ? xb : R.x; n++;
+            segs[n][0] = xa > right ? xa : right; segs[n][1] = xb; n++;
+        } else if (y >= R.y && y < R.y + R.height) {
+            segs[n][0] = xa; segs[n][1] = xb < R.x + r ? xb : R.x + r; n++;
+            segs[n][0] = xa > right - r ? xa : right - r; segs[n][1] = xb; n++;
+        } else {
+            segs[n][0] = xa; segs[n][1] = xb; n++;
+        }
+        int cy2 = 2 * y + 1;
+        int qy = (cy2 > scy2 ? cy2 - scy2 : scy2 - cy2) - (hh2 - r2);
+        for (int k = 0; k < n; ++k) {
+            for (int x = segs[k][0]; x < segs[k][1]; ++x) {
+                int cx2 = 2 * x + 1;
+                int qx = (cx2 > scx2 ? cx2 - scx2 : scx2 - cx2) - (hw2 - r2);
+                int outer, inner;
+                if (qx > 0 && qy > 0) {
+                    outer = (int)zsr_isqrt32((uint32_t)(qx * qx + qy * qy));
+                    inner = 0;
+                } else {
+                    outer = (qx > 0 ? qx : 0) + (qy > 0 ? qy : 0);
+                    inner = qx > qy ? qx : qy;
+                    if (inner > 0) inner = 0;
+                }
+                int idx = outer + inner - r2 + blur;
+                if (idx >= span) continue;
+                if (idx < 0) idx = 0;
+                int a = lut[idx];
+                if (a <= 0) continue;
+                int cov = zsr_rr_cov(x, y, R, r);
+                if (cov >= 255) continue;
+                if (cov > 0) a = a * (255 - cov) / 255;
+                row[x] = zsr_px_over(row[x], color, a);
+            }
+        }
+    }
+}
+
+static int zsr_ttf_width(const char *t)
+{
+    int w = 0;
+    for (; *t; ++t) {
+        int gw, gh, xo, yo, adv;
+        fb_ttf_glyph(*t, &gw, &gh, &xo, &yo, &adv);
+        w += adv;
+    }
+    return w;
+}
+
+static void zsr_ttf_draw_clipped(zsr_surface_t *s, int x, int y, const char *t,
+                                 zsr_rect_t clip, zsr_color_t color)
+{
+    int ca = ZSR_ALPHA(color);
+    zsr_rect_t c = zsr_rect_clip(clip, zsr_rect_make(0, 0, s->width, s->height));
+    if (!ca || zsr_rect_empty(c)) return;
+    int stride = s->pitch / 4, base = y + ZSR_TTF_SIZE, cx = x;
+    for (; *t; ++t) {
+        int gw, gh, xo, yo, adv;
+        const uint8_t *bm = fb_ttf_glyph(*t, &gw, &gh, &xo, &yo, &adv);
+        for (int j = 0; j < gh; ++j) {
+            int py = base + yo + j;
+            if (py < c.y || py >= c.y + c.height) continue;
+            uint32_t *row = s->pixels + (size_t)py * stride;
+            for (int i = 0; i < gw; ++i) {
+                int px = cx + xo + i, a = bm[j * 512 + i];
+                if (!a || px < c.x || px >= c.x + c.width) continue;
+                row[px] = zsr_px_over(row[px], color, ZSR_DIV255(ca * a));
+            }
+        }
+        cx += adv;
+    }
+}
+
+static zsr_command_t *zsr_emit_op(zsr_command_list_t *list, zsr_opcode_t op, zsr_rect_t rect,
+                                  int radius, zsr_rect_t clip, zsr_color_t color)
+{
+    zsr_command_t *c = zsr_command_push(list, op);
+    if (!c) return 0;
+    c->rect = rect;
+    c->radius = radius;
+    c->clip = clip;
+    c->color = color;
+    return c;
+}
+
+static void zsr_emit_aa_rrect(zsr_command_list_t *l, zsr_rect_t r, int radius, zsr_color_t color)
+{
+    zsr_emit_op(l, ZSR_CMD_AA_ROUNDED, r, radius, zsr_rect_make(0, 0, 32767, 32767), color);
+}
+
+static void zsr_emit_aa_ring(zsr_command_list_t *l, zsr_rect_t r, int radius, int t, zsr_color_t color)
+{
+    zsr_command_t *c = zsr_emit_op(l, ZSR_CMD_AA_RING, r, radius, zsr_rect_make(0, 0, 32767, 32767), color);
+    if (c) c->thickness = t;
+}
+
+static void zsr_emit_aa_line(zsr_command_list_t *l, int x0, int y0, int x1, int y1, int t, zsr_color_t color)
+{
+    zsr_command_t *c = zsr_emit_op(l, ZSR_CMD_AA_LINE, zsr_rect_make(0, 0, 0, 0), 0,
+                                   zsr_rect_make(0, 0, 32767, 32767), color);
+    if (!c) return;
+    c->x0 = x0; c->y0 = y0; c->x1 = x1; c->y1 = y1; c->thickness = t;
+}
+
+static void zsr_emit_ttf(zsr_command_list_t *l, int x, int baseline, const char *text,
+                         zsr_rect_t clip, zsr_color_t color)
+{
+    zsr_command_t *c = zsr_emit_op(l, ZSR_CMD_TTF_TEXT, zsr_rect_make(x, baseline - ZSR_TTF_SIZE, 0, 0), 0, clip, color);
+    if (!c) return;
+    uint32_t n = 0;
+    while (text[n] && n < ZSR_MAX_TEXT - 1) ++n;
+    zsr_copy_string(c->text, sizeof(c->text), text, n);
+}
+
 static int g_active_tab_index = 0;
+
+/* The focused, visible, non-minimized app window (only while the shell is "open") */
+static struct window *zsr_active_app(void)
+{
+    struct window *w = wm_get_focused();
+    if (!g_window_open || !w || !w->visible || w->minimized) return 0;
+    return w;
+}
+
+static bool zsr_overlay_hidden(void)
+{
+    struct window *w = zsr_active_app();
+    return w && w->frameless;
+}
+
+static void zsr_content_origin(const struct window *w, zsr_rect_t frame, int *ox, int *oy)
+{
+    if (w->frameless) { *ox = frame.x; *oy = frame.y; }
+    else { *ox = frame.x + ZSR_WIN_PAD; *oy = frame.y + ZSR_TITLEBAR_HEIGHT; }
+}
+
+/* Traffic-light centres: close, minimize, zoom */
+static void zsr_ctl_center(zsr_rect_t frame, int i, int *cx, int *cy)
+{
+    *cx = frame.x + 24 + i * 22;
+    *cy = frame.y + 22;
+}
+
+static bool zsr_controls_hover(zsr_rect_t frame)
+{
+    return g_mouse_x >= frame.x + 10 && g_mouse_x < frame.x + 84 &&
+           g_mouse_y >= frame.y + 8 && g_mouse_y < frame.y + 36;
+}
+
+/* Run the app's on_draw straight into its content buffer (no render queue) */
+static void zsr_render_app_into_buffer(struct window *app)
+{
+    if (!app->needs_redraw) return;
+    app->needs_redraw = false;
+    if (!app->content_buffer || !app->on_draw) return;
+    render_queue_clear(&app->surface.queue);
+    gapi_set_current_context(&app->surface.context);
+    gapi_set_immediate(true);
+    fb_set_base_target(app->content_buffer, app->width, app->height, app->width * 4);
+    app->on_draw(app);
+    fb_set_base_target(0, 0, 0, 0);
+    gapi_set_immediate(false);
+    gapi_set_current_context(NULL);
+}
 
 static void zsr_build_zarqaa_window(
     zsr_command_list_t *list,
@@ -1648,377 +2084,199 @@ static void zsr_build_zarqaa_window(
     bool is_dragging
 )
 {
+    (void)is_dragging;
     zsr_rect_t screen_clip = zsr_rect_make(0, 0, 32767, 32767);
+    struct window *app = zsr_active_app();
+    if (!app) return;
 
-    /* 1. Window Drop Shadow - omit during active drag for smooth 60 FPS performance */
-    if (!is_dragging) {
-        zsr_rect_t shadow = zsr_rect_make(
-            frame.x,
-            frame.y + 16,
-            frame.width,
-            frame.height
-        );
-        zsr_emit_rounded_rect(
-            list,
-            shadow,
-            18,
-            screen_clip,
-            ZSR_RGBA(0, 0, 0, 110)
-        );
+    zsr_render_app_into_buffer(app);
+
+    if (app->frameless) {
+        if (app->content_buffer)
+            zsr_emit_blit_buffer(list, zsr_rect_make(frame.x, frame.y, app->width, app->height),
+                                 app->content_buffer, app->width * 4, frame);
+        return;
     }
 
-    /* 2. Glass Window Body */
-    zsr_emit_rounded_rect(
-        list,
-        frame,
-        16,
-        screen_clip,
-        ZSR_RGBA(120, 175, 255, 40)
-    );
+    /* Glass body (must stay the first command: the renderer folds it into the wallpaper) */
+    zsr_emit_rounded_rect(list, frame, ZSR_CHROME_RADIUS, screen_clip, ZSR_RGBA(12, 30, 72, 178));
 
-    /* 3. Subtle White Border */
-    zsr_emit_border(
-        list,
-        frame,
-        16,
-        1,
-        screen_clip,
-        ZSR_RGBA(140, 195, 255, 100)
-    );
+    zsr_command_t *sh = zsr_emit_op(list, ZSR_CMD_SHADOW, frame, ZSR_CHROME_RADIUS, screen_clip,
+                                    ZSR_RGBA(0, 6, 24, 150));
+    if (sh) sh->thickness = ZSR_SHADOW_BLUR, sh->y0 = ZSR_SHADOW_DY;
 
-    /* 4. Top Highlight Line */
-    zsr_emit_line(
-        list,
-        frame.x + 16,
-        frame.y + 1,
-        frame.x + frame.width - 16,
-        frame.y + 1,
-        1,
-        screen_clip,
-        ZSR_RGBA(255, 255, 255, 80)
-    );
+    zsr_emit_aa_ring(list, frame, ZSR_CHROME_RADIUS, 1, ZSR_RGBA(150, 200, 255, 95));
 
-    /* 5. Titlebar Separator */
-    zsr_emit_line(
-        list,
-        frame.x + 1,
-        frame.y + ZSR_TITLEBAR_HEIGHT,
-        frame.x + frame.width - 1,
-        frame.y + ZSR_TITLEBAR_HEIGHT,
-        1,
-        screen_clip,
-        ZSR_RGBA(255, 255, 255, 25)
-    );
-
-
-
-
-
-    /* 8. Star Logo on Titlebar */
-    int logo_x = frame.x + 28;
-    int logo_y = frame.y + 22;
-
-    zsr_emit_triangle(
-        list,
-        (zsr_point_t){logo_x, logo_y - 9},
-        (zsr_point_t){logo_x + 4, logo_y + 4},
-        (zsr_point_t){logo_x - 4, logo_y + 4},
-        screen_clip,
-        ZSR_RGBA(255, 255, 255, 230)
-    );
-
-    zsr_emit_triangle(
-        list,
-        (zsr_point_t){logo_x, logo_y + 9},
-        (zsr_point_t){logo_x + 4, logo_y - 4},
-        (zsr_point_t){logo_x - 4, logo_y - 4},
-        screen_clip,
-        ZSR_RGBA(255, 255, 255, 230)
-    );
-
-    /* Titlebar Title + Live FPS & VSync Badge */
-    extern uint32_t gui_get_fps(void);
-    extern bool fb_get_vsync(void);
-    struct window *active_win = wm_get_focused();
-    char title_buf[96];
-    if (active_win && active_win->visible && !active_win->minimized && active_win->title[0] != '\0') {
-        snprintf(title_buf, sizeof(title_buf), "%s  |  %u FPS  |  VSync: %s [F8]",
-                 active_win->title, gui_get_fps(), fb_get_vsync() ? "ON" : "OFF (Uncapped)");
-    } else {
-        snprintf(title_buf, sizeof(title_buf), "Zarqaa Blue  |  %u FPS  |  VSync: %s [F8]",
-                 gui_get_fps(), fb_get_vsync() ? "ON" : "OFF (Uncapped)");
-    }
-    zsr_emit_text(list, frame.x + 46, frame.y + 16, title_buf, 1, screen_clip, ZSR_RGBA(255, 255, 255, 220));
-
-    /* 9. Window Controls */
-    int button_y = frame.y + 22;
-    int green_x = frame.x + frame.width - 24;
-    int yellow_x = frame.x + frame.width - 52;
-    int red_x = frame.x + frame.width - 80;
-    int min_x = frame.x + frame.width - 108;
-
-    zsr_emit_line(
-        list,
-        min_x - 5,
-        button_y,
-        min_x + 5,
-        button_y,
-        2,
-        screen_clip,
-        ZSR_RGBA(226, 232, 240, 255)
-    );
-
-    zsr_emit_triangle(
-        list,
-        (zsr_point_t){red_x, button_y - 7},
-        (zsr_point_t){red_x + 7, button_y + 6},
-        (zsr_point_t){red_x - 7, button_y + 6},
-        screen_clip,
-        ZSR_RGBA(248, 113, 113, 255)
-    );
-
-    zsr_emit_triangle(
-        list,
-        (zsr_point_t){yellow_x, button_y + 7},
-        (zsr_point_t){yellow_x + 7, button_y - 6},
-        (zsr_point_t){yellow_x - 7, button_y - 6},
-        screen_clip,
-        ZSR_RGBA(250, 204, 21, 255)
-    );
-
-    zsr_emit_triangle(
-        list,
-        (zsr_point_t){green_x, button_y - 7},
-        (zsr_point_t){green_x + 7, button_y + 6},
-        (zsr_point_t){green_x - 7, button_y + 6},
-        screen_clip,
-        ZSR_RGBA(74, 222, 128, 255)
-    );
-
-    /* 10. Legacy App Bridge */
-    if (active_win && active_win->visible && !active_win->minimized) {
-        if (active_win->needs_redraw) {
-            active_win->needs_redraw = false;
-            render_queue_clear(&active_win->surface.queue);
-            gapi_set_current_context(&active_win->surface.context);
-            if (active_win->on_draw) {
-                active_win->on_draw(active_win);
-            }
-            gapi_set_current_context(NULL);
-        }
-
-        /* Set clipping region to inside the glass window */
-        zsr_rect_t content_clip = zsr_rect_make(
-            frame.x + 1,
-            frame.y + ZSR_TITLEBAR_HEIGHT,
-            frame.width - 2,
-            frame.height - ZSR_TITLEBAR_HEIGHT - 1
-        );
-        content_clip = zsr_rect_clip(content_clip, screen_clip);
-
-        int ox = frame.x;
-        int oy = frame.y + ZSR_TITLEBAR_HEIGHT;
-
-        /* Blit active window content buffer directly into glass container */
-        if (active_win->content_buffer) {
-            zsr_emit_blit_buffer(list, zsr_rect_make(ox, oy, active_win->width, active_win->height), 
-                                 active_win->content_buffer, active_win->width * 4, content_clip);
-        }
-
-        /* Translate legacy RenderQueue to ZSR commands */
-        RenderQueueChunk *chunk = active_win->surface.queue.head;
-        while (chunk) {
-            for (int c = 0; c < chunk->count; c++) {
-                RenderCommand *cmd = &chunk->commands[c];
-                switch (cmd->opcode) {
-                    case RENDER_OP_FILL_RECT:
-                    case RENDER_OP_DRAW_RECT: {
-                        zsr_rect_t r = zsr_rect_make(ox + cmd->rect.x, oy + cmd->rect.y, cmd->rect.w, cmd->rect.h);
-                        /* Using rounded rect with radius 0 to act as fill_rect since ZSR has no standard fill_rect */
-                        zsr_emit_rounded_rect(list, r, 0, content_clip, cmd->rect.color);
-                        break;
-                    }
-                    case RENDER_OP_DRAW_LINE:
-                        zsr_emit_line(list, ox + cmd->line.x0, oy + cmd->line.y0, ox + cmd->line.x1, oy + cmd->line.y1, 1, content_clip, cmd->line.color);
-                        break;
-                    case RENDER_OP_DRAW_STRING:
-                    case RENDER_OP_DRAW_STRING_TRANS:
-                        zsr_emit_text(list, ox + cmd->text.x, oy + cmd->text.y, cmd->text.text, 1, content_clip, cmd->text.fg);
-                        break;
-                    case RENDER_OP_DRAW_IMAGE:
-                        zsr_emit_blit_buffer(list, zsr_rect_make(ox + cmd->image.x, oy + cmd->image.y, cmd->image.w, cmd->image.h), cmd->image.pixels, cmd->image.w * 4, content_clip);
-                        break;
-                }
-            }
-            chunk = chunk->next;
-        }
-    } else {
-        /* No active window: Render Interactive Tab Bar & Dashboard */
-        const char *tabs[4] = {
-            "Desktop",
-            "Apps",
-            "Files",
-            "Settings"
-        };
-
-        int tab_x = frame.x + 24;
-        int tab_y = frame.y + 52;
-
-        for (int i = 0; i < 4; ++i) {
-            zsr_rect_t tab_rect = zsr_rect_make(
-                tab_x,
-                tab_y,
-                74,
-                28
-            );
-
-            if (i == g_active_tab_index) {
-                zsr_emit_rounded_rect(
-                    list,
-                    tab_rect,
-                    14,
-                    screen_clip,
-                    ZSR_RGBA(37, 99, 235, 190)
-                );
-            }
-
-            int text_len = 0;
-            while (tabs[i][text_len]) text_len++;
-            int tx = tab_x + (74 - text_len * 8) / 2;
-            int ty = tab_y + 6;
-
-            zsr_emit_text(
-                list,
-                tx,
-                ty,
-                tabs[i],
-                1,
-                screen_clip,
-                (i == g_active_tab_index)
-                    ? ZSR_RGBA(255, 255, 255, 250)
-                    : ZSR_RGBA(255, 255, 255, 165)
-            );
-
-            tab_x += 82;
-        }
-
-        /* Separator line below tabs */
-        zsr_emit_line(list, frame.x + 20, frame.y + 88, frame.x + frame.width - 20, frame.y + 88, 1, screen_clip, ZSR_RGBA(255, 255, 255, 25));
-
-        /* Dashboard content clipping region */
-        zsr_rect_t content_clip = zsr_rect_make(
-            frame.x + 1,
-            frame.y + 89,
-            frame.width - 2,
-            frame.height - 90
-        );
-        content_clip = zsr_rect_clip(content_clip, screen_clip);
-
-        int ox = frame.x + 24;
-        int oy = frame.y + 100;
-
-        if (g_active_tab_index == 0) {
-            /* Tab 0: Desktop & System Status */
-            zsr_emit_text(list, ox, oy, "Zarqaa OS Blue - System Overview", 1, content_clip, ZSR_RGBA(255, 255, 255, 240));
-            zsr_emit_line(list, ox, oy + 20, ox + frame.width - 48, oy + 20, 1, content_clip, ZSR_RGBA(255, 255, 255, 30));
-
-            zsr_rect_t card = zsr_rect_make(ox, oy + 32, frame.width - 48, 160);
-            zsr_emit_rounded_rect(list, card, 12, content_clip, ZSR_RGBA(70, 140, 255, 28));
-            zsr_emit_border(list, card, 12, 1, content_clip, ZSR_RGBA(255, 255, 255, 30));
-
-            zsr_emit_text(list, ox + 16, oy + 48,  "Architecture : x86_64 Higher-Half Direct Map (SMP 2 Cores)", 1, content_clip, ZSR_RGBA(200, 225, 255, 230));
-            zsr_emit_text(list, ox + 16, oy + 70,  "Memory       : 2048 MB RAM (Higher-Half Virtual Memory)", 1, content_clip, ZSR_RGBA(200, 225, 255, 230));
-            zsr_emit_text(list, ox + 16, oy + 92,  "Display      : VirtIO-GPU / Bochs BGA Hardware Accelerated", 1, content_clip, ZSR_RGBA(200, 225, 255, 230));
-            zsr_emit_text(list, ox + 16, oy + 114, "Storage      : FAT32 (/hd0) + RamFS (Zero-Copy TarFS)", 1, content_clip, ZSR_RGBA(200, 225, 255, 230));
-            zsr_emit_text(list, ox + 16, oy + 136, "Network      : RTL8139 Fast Ethernet DHCP Active (10.0.2.15)", 1, content_clip, ZSR_RGBA(74, 222, 128, 230));
-
-            zsr_emit_text(list, ox, oy + 215, "Tip: Click on 'Apps' tab above or the Dock icons below to launch apps!", 1, content_clip, ZSR_RGBA(255, 255, 255, 140));
-        }
-        else if (g_active_tab_index == 1) {
-            /* Tab 1: Applications Grid */
-            zsr_emit_text(list, ox, oy, "Installed Applications (Click any card to launch)", 1, content_clip, ZSR_RGBA(255, 255, 255, 240));
-            zsr_emit_line(list, ox, oy + 20, ox + frame.width - 48, oy + 20, 1, content_clip, ZSR_RGBA(255, 255, 255, 30));
-
-            static const char *app_names[ZSR_NUM_APP_CARDS] = {
-                "Terminal",     "Calculator",   "Notepad+",     "File Manager",
-                "Studio Paint", "Browser",      "Gallery",      "Task Manager",
-                "Snake Game",   "Python IDE",   "Settings",     "Devices",
-                "Benchmark",    "Boot Log",     "Clock",        "Calendar",
-                "About",        "2048",         "Minesweeper"
-            };
-            static const char *app_descs[ZSR_NUM_APP_CARDS] = {
-                "CLI & ELF Shell",   "ZUI Math Engine",   "Text Editor",     "Disks & Files",
-                "Drawing & Graphics","HTML Web Engine",   "Image Viewer",    "Process Monitor",
-                "Ring-3 ELF Game",   "Mini IDE",          "Preferences",     "Hardware & PCI",
-                "Physics Engine",    "System Logs",       "Time & Timer",    "Month View",
-                "System Info",       "Puzzle Game",       "Puzzle Game"
-            };
-
-            int cols = ZSR_APP_CARD_COLS;
-            int card_w = (frame.width - 48 - (cols - 1) * 16) / cols;
-            int card_h = 56;
-
-            for (int i = 0; i < ZSR_NUM_APP_CARDS; i++) {
-                int col = i % cols;
-                int row = i / cols;
-                int cx = ox + col * (card_w + 16);
-                int cy = oy + 36 + row * (card_h + 14);
-
-                zsr_rect_t c_rect = zsr_rect_make(cx, cy, card_w, card_h);
-                zsr_emit_rounded_rect(list, c_rect, 10, content_clip, ZSR_RGBA(70, 140, 255, 34));
-                zsr_emit_border(list, c_rect, 10, 1, content_clip, ZSR_RGBA(130, 190, 255, 70));
-
-                zsr_emit_text(list, cx + 16, cy + 12, app_names[i], 1, content_clip, ZSR_RGBA(255, 255, 255, 240));
-                zsr_emit_text(list, cx + 16, cy + 32, app_descs[i], 1, content_clip, ZSR_RGBA(180, 205, 235, 170));
-            }
-        }
-        else if (g_active_tab_index == 2) {
-            /* Tab 2: Storage Explorer */
-            zsr_emit_text(list, ox, oy, "Storage Explorer (/hd0 Primary Volume)", 1, content_clip, ZSR_RGBA(255, 255, 255, 240));
-            zsr_emit_line(list, ox, oy + 20, ox + frame.width - 48, oy + 20, 1, content_clip, ZSR_RGBA(255, 255, 255, 30));
-
-            static const char *files[] = {
-                "[DIR]  wallpapers/         (Desktop Wallpapers Collection)",
-                "[DIR]  www/                (Local HTML Offline Web Pages)",
-                "[ELF]  calc.elf            (Native 64-bit Calculator Binary)",
-                "[ELF]  hello.elf           (Ring-3 Hello World Executable)",
-                "[ELF]  snake.elf           (Ring-3 Interactive Snake Game)",
-                "[ELF]  sh.elf              (Zarqaa Unix-like Shell)",
-                "[TXT]  test.txt            (Sample text document)",
-                "[AUD]  nari.mp3            (AC97 Audio Track Sample)"
-            };
-
-            for (int i = 0; i < 8; i++) {
-                zsr_rect_t f_rect = zsr_rect_make(ox, oy + 32 + i * 26, frame.width - 48, 22);
-                zsr_emit_rounded_rect(list, f_rect, 6, content_clip, ZSR_RGBA(255, 255, 255, 10));
-                zsr_emit_text(list, ox + 12, oy + 36 + i * 26, files[i], 1, content_clip, ZSR_RGBA(225, 235, 245, 220));
-            }
-        }
-        else if (g_active_tab_index == 3) {
-            /* Tab 3: System Settings */
-            zsr_emit_text(list, ox, oy, "System Settings & Preferences", 1, content_clip, ZSR_RGBA(255, 255, 255, 240));
-            zsr_emit_line(list, ox, oy + 20, ox + frame.width - 48, oy + 20, 1, content_clip, ZSR_RGBA(255, 255, 255, 30));
-
-            zsr_rect_t s1 = zsr_rect_make(ox, oy + 32, frame.width - 48, 48);
-            zsr_emit_rounded_rect(list, s1, 10, content_clip, ZSR_RGBA(255, 255, 255, 15));
-            zsr_emit_border(list, s1, 10, 1, content_clip, ZSR_RGBA(255, 255, 255, 35));
-            zsr_emit_text(list, ox + 16, oy + 46, "Visual Theme: Zarqaa Blue (Active)", 1, content_clip, ZSR_RGBA(255, 255, 255, 230));
-
-            zsr_rect_t s2 = zsr_rect_make(ox, oy + 92, frame.width - 48, 48);
-            zsr_emit_rounded_rect(list, s2, 10, content_clip, ZSR_RGBA(255, 255, 255, 15));
-            zsr_emit_border(list, s2, 10, 1, content_clip, ZSR_RGBA(255, 255, 255, 35));
-            char vsync_card[96];
-            snprintf(vsync_card, sizeof(vsync_card), "VSync System: [%s]  |  %u FPS  (Click or press F8 to toggle)",
-                     fb_get_vsync() ? "ENABLED (Locked)" : "DISABLED (Uncapped)", gui_get_fps());
-            zsr_emit_text(list, ox + 16, oy + 106, vsync_card, 1, content_clip,
-                          fb_get_vsync() ? ZSR_RGBA(74, 222, 128, 240) : ZSR_RGBA(250, 204, 21, 240));
-
-            zsr_rect_t s3 = zsr_rect_make(ox, oy + 152, frame.width - 48, 48);
-            zsr_emit_rounded_rect(list, s3, 10, content_clip, ZSR_RGBA(255, 255, 255, 15));
-            zsr_emit_border(list, s3, 10, 1, content_clip, ZSR_RGBA(255, 255, 255, 35));
-            zsr_emit_text(list, ox + 16, oy + 166, "Display Mode: 1024x768 32-bit ARGB (Direct Framebuffer Blit)", 1, content_clip, ZSR_RGBA(255, 255, 255, 230));
+    /* Traffic lights */
+    static const zsr_color_t fill[3] = {
+        ZSR_RGBA(255, 95, 87, 255), ZSR_RGBA(254, 188, 46, 255), ZSR_RGBA(40, 200, 64, 255)
+    };
+    static const zsr_color_t glyph[3] = {
+        ZSR_RGBA(90, 14, 10, 230), ZSR_RGBA(100, 62, 0, 230), ZSR_RGBA(8, 70, 18, 230)
+    };
+    bool hover = zsr_controls_hover(frame);
+    for (int i = 0; i < 3; ++i) {
+        int cx, cy;
+        zsr_ctl_center(frame, i, &cx, &cy);
+        zsr_rect_t dot = zsr_rect_make(cx - 7, cy - 7, 15, 15);
+        zsr_emit_aa_rrect(list, dot, 7, fill[i]);
+        zsr_emit_aa_ring(list, dot, 7, 1, ZSR_RGBA(0, 0, 0, 55));
+        if (!hover) continue;
+        if (i == 0) {
+            zsr_emit_aa_line(list, cx - 3, cy - 3, cx + 3, cy + 3, 1, glyph[i]);
+            zsr_emit_aa_line(list, cx - 3, cy + 3, cx + 3, cy - 3, 1, glyph[i]);
+        } else if (i == 1) {
+            zsr_emit_aa_line(list, cx - 3, cy, cx + 3, cy, 1, glyph[i]);
+        } else {
+            zsr_emit_aa_line(list, cx - 3, cy, cx + 3, cy, 1, glyph[i]);
+            zsr_emit_aa_line(list, cx, cy - 3, cx, cy + 3, 1, glyph[i]);
         }
     }
+
+    /* Centered title */
+    int tw = zsr_ttf_width(app->title);
+    int tx = frame.x + (frame.width - tw) / 2;
+    if (tx < frame.x + 96) tx = frame.x + 96;
+    zsr_emit_ttf(list, tx, frame.y + 27, app->title,
+                 zsr_rect_make(frame.x + 96, frame.y, frame.width - 112, ZSR_TITLEBAR_HEIGHT),
+                 ZSR_RGBA(234, 242, 255, 235));
+
+    /* App content, 1px hairline around it */
+    if (app->content_buffer) {
+        int ox, oy;
+        zsr_content_origin(app, frame, &ox, &oy);
+        zsr_rect_t cr = zsr_rect_make(ox, oy, app->width, app->height);
+        zsr_emit_border(list, zsr_rect_make(ox - 1, oy - 1, app->width + 2, app->height + 2),
+                        0, 1, screen_clip, ZSR_RGBA(255, 255, 255, 28));
+        zsr_emit_blit_buffer(list, cr, app->content_buffer, app->width * 4, cr);
+    }
+}
+
+/* ------------------------------------------------------------
+   Top bar
+   ------------------------------------------------------------ */
+static const char *g_month_names[12] = {
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+};
+static const char *g_day_names[7] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+
+static void zsr_clock_text(char *out, int cap)
+{
+    uint64_t now = zb_now();
+    int hh = (int)((now / 3600) % 24), mm = (int)((now / 60) % 60);
+    int y, m, d;
+    zb_civil((int64_t)(now / 86400), &y, &m, &d);
+    snprintf(out, cap, "%s %d %s   %02d:%02d", g_day_names[zb_weekday(y, m, d)], d,
+             g_month_names[(m - 1) % 12], hh, mm);
+}
+
+static void zsr_build_topbar(zsr_command_list_t *list, int sw)
+{
+    zsr_rect_t clip = zsr_rect_make(0, 0, 32767, 32767);
+    zsr_command_t *bar = zsr_command_push(list, ZSR_CMD_FILL_RECT);
+    if (bar) {
+        bar->rect = zsr_rect_make(0, 0, sw, ZSR_TOPBAR_H);
+        bar->clip = clip;
+        bar->color = ZSR_RGBA(6, 20, 54, 165);
+    }
+    zsr_command_t *ln = zsr_command_push(list, ZSR_CMD_FILL_RECT);
+    if (ln) {
+        ln->rect = zsr_rect_make(0, ZSR_TOPBAR_H - 1, sw, 1);
+        ln->clip = clip;
+        ln->color = ZSR_RGBA(140, 195, 255, 38);
+    }
+
+    zsr_emit_aa_rrect(list, zsr_rect_make(14, 10, 10, 10), 5, ZSR_RGBA(108, 180, 255, 255));
+    zsr_emit_ttf(list, 32, 20, "Zarqaa", clip, ZSR_RGBA(240, 246, 255, 245));
+
+    struct window *app = zsr_active_app();
+    if (app && !app->frameless)
+        zsr_emit_ttf(list, 32 + zsr_ttf_width("Zarqaa") + 16, 20, app->title, clip, ZSR_RGBA(190, 212, 245, 190));
+
+    char buf[40];
+    zsr_clock_text(buf, sizeof(buf));
+    zsr_emit_ttf(list, sw - 16 - zsr_ttf_width(buf), 20, buf, clip, ZSR_RGBA(226, 238, 255, 235));
+}
+
+static uint64_t g_topbar_minute = ~0ull;
+
+static void zsr_tick_topbar(zsr_compositor_t *compositor)
+{
+    uint64_t minute = zb_now() / 60;
+    if (minute == g_topbar_minute) return;
+    g_topbar_minute = minute;
+    zsr_damage_add(&compositor->damage, zsr_rect_make(0, 0, g_screen_w, ZSR_TOPBAR_H));
+}
+
+/* ------------------------------------------------------------
+   Keep the window frame in sync with the hosted app
+   ------------------------------------------------------------ */
+static int g_sync_id = -1, g_sync_w, g_sync_h;
+static bool g_force_center;
+
+/* Remember where each window was left so switching apps does not recenter it */
+#define ZSR_POS_SLOTS 16
+static struct { int id, x, y; } g_win_pos[ZSR_POS_SLOTS];
+static int g_win_pos_next;
+
+static void zsr_pos_store(int id, int x, int y)
+{
+    for (int i = 0; i < ZSR_POS_SLOTS; ++i)
+        if (g_win_pos[i].id == id) { g_win_pos[i].x = x; g_win_pos[i].y = y; return; }
+    g_win_pos[g_win_pos_next].id = id;
+    g_win_pos[g_win_pos_next].x = x;
+    g_win_pos[g_win_pos_next].y = y;
+    g_win_pos_next = (g_win_pos_next + 1) % ZSR_POS_SLOTS;
+}
+
+static bool zsr_pos_load(int id, int *x, int *y)
+{
+    for (int i = 0; i < ZSR_POS_SLOTS; ++i)
+        if (g_win_pos[i].id == id) { *x = g_win_pos[i].x; *y = g_win_pos[i].y; return true; }
+    return false;
+}
+
+static void zsr_sync_window_to_app(zsr_compositor_t *c)
+{
+    struct window *app = zsr_active_app();
+    if (!app) {
+        if (g_sync_id != -1) {
+            g_sync_id = -1;
+            zsr_request_full_redraw(c);
+        }
+        g_window_open = false;
+        return;
+    }
+    zsr_rect_t *b = &c->main_window.bounds;
+    if (g_sync_id != -1 && !app->frameless) zsr_pos_store(g_sync_id, b->x, b->y);
+    int fw, fh;
+    if (app->frameless) { fw = g_screen_w; fh = g_screen_h; }
+    else { fw = app->width + 2 * ZSR_WIN_PAD; fh = ZSR_TITLEBAR_HEIGHT + app->height + ZSR_WIN_PAD; }
+
+    bool fresh = app->id != g_sync_id;
+    if (!fresh && !g_force_center && g_sync_w == fw && g_sync_h == fh) return;
+
+    b->width = fw;
+    b->height = fh;
+    if (fresh || g_force_center || app->frameless) {
+        int dock_top = g_screen_h - 70 - 15;
+        int usable = dock_top - 10 - ZSR_TOPBAR_H;
+        b->x = (g_screen_w - fw) / 2;
+        b->y = ZSR_TOPBAR_H + (usable - fh) / 2;
+        if (b->y < ZSR_TOPBAR_H + 4) b->y = ZSR_TOPBAR_H + 4;
+        int px, py;
+        if (fresh && !g_force_center && !app->frameless && zsr_pos_load(app->id, &px, &py)) {
+            b->x = px;
+            b->y = py;
+        }
+        if (app->frameless) { b->x = 0; b->y = 0; }
+    }
+    g_force_center = false;
+    g_sync_id = app->id;
+    g_sync_w = fw;
+    g_sync_h = fh;
+    c->main_window.previous_bounds = *b;
+    zsr_request_full_redraw(c);
 }
 
 
@@ -2104,9 +2362,6 @@ static void zsr_build_from_node(zsr_node_t *node, zsr_command_list_t *list)
    12) WINDOW INTERACTION & DRAG
    ============================================================ */
 
-static int g_mouse_x = -1;
-static int g_mouse_y = -1;
-static zsr_rect_t g_old_mouse_rect = {0, 0, 0, 0};
 
 static void zsr_draw_mouse_cursor(zsr_surface_t *surface)
 {
@@ -2209,59 +2464,73 @@ static void zsr_build_desktop_dock(zsr_command_list_t *list, int screen_width, i
     int dock_h = 70;
     int dock_x = (screen_width - dock_w) / 2;
     int dock_y = screen_height - dock_h - 15;
-    
+
     zsr_rect_t dock_rect = zsr_rect_make(dock_x, dock_y, dock_w, dock_h);
     zsr_rect_t clip = zsr_rect_make(0, 0, 32767, 32767);
-    
-    // Draw Glass Background
-    zsr_emit_rounded_rect(list, dock_rect, 20, clip, ZSR_RGBA(8, 28, 72, 205));
-    zsr_emit_border(list, dock_rect, 20, 1, clip, ZSR_RGBA(96, 165, 250, 100));
-    
+
+    zsr_command_t *sh = zsr_emit_op(list, ZSR_CMD_SHADOW, dock_rect, 22, clip, ZSR_RGBA(0, 6, 24, 120));
+    if (sh) sh->thickness = 18, sh->y0 = 6;
+    zsr_emit_aa_rrect(list, dock_rect, 22, ZSR_RGBA(8, 24, 62, 205));
+    zsr_emit_aa_ring(list, dock_rect, 22, 1, ZSR_RGBA(130, 185, 255, 80));
+
     int start_x = dock_x + 20 + spacing / 2;
     int dock_cy = dock_y + dock_h / 2;
-    
+
     for (int i = 0; i < ZSR_NUM_DOCK; ++i) {
         int cx = start_x + i * spacing;
-        
         bool hover = (g_mouse_x >= cx - 24 && g_mouse_x <= cx + 24 && g_mouse_y >= dock_y && g_mouse_y <= dock_y + dock_h);
-        
-        // Draw icon
-        if (g_zsr_dock_buttons[i].bitmap) {
-            int draw_cx = cx;
-            int draw_cy = dock_cy;
-            
-            if (g_is_dock_dragging && i == g_drag_dock_index) {
-                draw_cx = g_mouse_x;
-                draw_cy = dock_cy; // Lock to horizontal axis for a cleaner look
-            } else if (hover && !g_is_dock_dragging) {
-                draw_cy -= 5; // Lift up slightly on hover
-            }
-            
+        int draw_cx = cx;
+        int draw_cy = dock_cy;
+        bool dragged = g_is_dock_dragging && i == g_drag_dock_index;
+
+        if (dragged) {
+            draw_cx = g_mouse_x;
+        } else if (hover && !g_is_dock_dragging) {
+            draw_cy -= 5;
+            zsr_emit_aa_rrect(list, zsr_rect_make(cx - 29, dock_y + 7, 58, 56), 15, ZSR_RGBA(160, 205, 255, 34));
+        }
+
+        if (g_zsr_dock_buttons[i].app_id == APP_POWER) {
+            /* Vector power icon on a rounded tile, matching the bitmap icons */
+            zsr_rect_t tile = zsr_rect_make(draw_cx - 20, draw_cy - 20, 40, 40);
+            zsr_emit_aa_rrect(list, tile, 10, ZSR_RGBA(214, 62, 78, 255));
+            zsr_emit_aa_ring(list, tile, 10, 1, ZSR_RGBA(255, 255, 255, 45));
+            zsr_command_t *rg = zsr_emit_op(list, ZSR_CMD_RING_GAP,
+                                            zsr_rect_make(draw_cx - 11, draw_cy - 10, 22, 22), 0, clip,
+                                            ZSR_RGBA(255, 255, 255, 255));
+            if (rg) rg->thickness = 3, rg->x0 = 4;
+            zsr_emit_aa_line(list, draw_cx, draw_cy - 12, draw_cx, draw_cy - 2, 3, ZSR_RGBA(255, 255, 255, 255));
+        } else if (g_zsr_dock_buttons[i].bitmap) {
             int bw = g_zsr_dock_buttons[i].bw;
             int bh = g_zsr_dock_buttons[i].bh;
             zsr_rect_t icon_rect = zsr_rect_make(draw_cx - bw / 2, draw_cy - bh / 2, bw, bh);
             zsr_emit_blit_buffer(list, icon_rect, (uint32_t *)g_zsr_dock_buttons[i].bitmap, bw * 4, clip);
         }
-        
-        // Draw indicator if running
+
         bool is_minimized = false;
         if (desktop_is_app_running(g_zsr_dock_buttons[i].app_id, &is_minimized)) {
-            zsr_color_t indicator_color = is_minimized ? ZSR_RGBA(0, 255, 255, 255) : ZSR_RGBA(0, 255, 0, 255);
-            
-            zsr_command_t *cmd = zsr_command_push(list, ZSR_CMD_FILL_RECT);
-            if (cmd) {
-                cmd->rect = zsr_rect_make(cx - 2, dock_y + dock_h - 10, 4, 4);
-                cmd->clip = clip;
-                cmd->color = indicator_color;
-            }
+            zsr_color_t dot = is_minimized ? ZSR_RGBA(108, 180, 255, 200) : ZSR_RGBA(61, 220, 151, 255);
+            zsr_emit_aa_rrect(list, zsr_rect_make(cx - 2, dock_y + dock_h - 10, 5, 5), 2, dot);
         }
-        
-        // Draw tooltip
-        if (hover) {
-            zsr_rect_t tooltip_rect = zsr_rect_make(cx - 40, dock_y - 35, 80, 24);
-            zsr_emit_rounded_rect(list, tooltip_rect, 12, clip, ZSR_RGBA(14, 52, 120, 235));
-            zsr_emit_text(list, cx - 20, dock_y - 28, g_zsr_dock_buttons[i].name, 1, clip, ZSR_RGBA(255, 255, 255, 255));
-        }
+    }
+
+    /* Tooltip pill above the hovered icon, drawn last so nothing covers it */
+    for (int i = 0; i < ZSR_NUM_DOCK && !g_is_dock_dragging; ++i) {
+        int cx = start_x + i * spacing;
+        if (!(g_mouse_x >= cx - 24 && g_mouse_x <= cx + 24 && g_mouse_y >= dock_y && g_mouse_y <= dock_y + dock_h))
+            continue;
+        const char *name = g_zsr_dock_buttons[i].name;
+        int tw = zsr_ttf_width(name);
+        int pw = tw + 24, ph = 26;
+        int px = cx - pw / 2;
+        if (px < 8) px = 8;
+        if (px + pw > screen_width - 8) px = screen_width - 8 - pw;
+        zsr_rect_t pill = zsr_rect_make(px, dock_y - 38, pw, ph);
+        zsr_command_t *ps = zsr_emit_op(list, ZSR_CMD_SHADOW, pill, 13, clip, ZSR_RGBA(0, 6, 24, 120));
+        if (ps) ps->thickness = 12, ps->y0 = 3;
+        zsr_emit_aa_rrect(list, pill, 13, ZSR_RGBA(8, 24, 62, 238));
+        zsr_emit_aa_ring(list, pill, 13, 1, ZSR_RGBA(130, 185, 255, 90));
+        zsr_emit_ttf(list, px + 12, pill.y + 18, name, clip, ZSR_RGBA(240, 246, 255, 255));
     }
 }
 
@@ -2302,21 +2571,20 @@ static void zsr_window_mouse_down(
     if (!zsr_point_in_rect(mouse_x, mouse_y, window->bounds))
         return;
 
-    zsr_rect_t r = window->bounds;
+    struct window *app = zsr_active_app();
+    if (app && app->frameless)
+        return;
 
+    zsr_rect_t r = window->bounds;
     window->previous_bounds = window->bounds;
     window->start_mouse_x = mouse_x;
     window->start_mouse_y = mouse_y;
     window->start_width = r.width;
     window->start_height = r.height;
+    window->resize_right = false;
+    window->resize_bottom = false;
 
-    window->resize_right = (mouse_x >= r.x + r.width - ZSR_RESIZE_MARGIN);
-    window->resize_bottom = (mouse_y >= r.y + r.height - ZSR_RESIZE_MARGIN);
-
-    if (!window->resize_right &&
-        !window->resize_bottom &&
-        mouse_y >= r.y &&
-        mouse_y < r.y + ZSR_TITLEBAR_HEIGHT) {
+    if (mouse_y >= r.y && mouse_y < r.y + ZSR_TITLEBAR_HEIGHT) {
         window->dragging = true;
         window->drag_offset_x = mouse_x - r.x;
         window->drag_offset_y = mouse_y - r.y;
@@ -2353,6 +2621,10 @@ static void zsr_window_mouse_move(
     if (window->dragging) {
         window->bounds.x = mouse_x - window->drag_offset_x;
         window->bounds.y = mouse_y - window->drag_offset_y;
+        if (window->bounds.y < ZSR_TOPBAR_H) window->bounds.y = ZSR_TOPBAR_H;
+        if (window->bounds.y > g_screen_h - 60) window->bounds.y = g_screen_h - 60;
+        if (window->bounds.x < 80 - window->bounds.width) window->bounds.x = 80 - window->bounds.width;
+        if (window->bounds.x > g_screen_w - 80) window->bounds.x = g_screen_w - 80;
     }
 
     if (window->resize_right) {
@@ -2375,7 +2647,7 @@ static void zsr_window_mouse_move(
     }
 
     /* Pure move: repaint only the old and new footprint (+margin for the 16px shadow) */
-    const int m = 24;
+    const int m = 40;
     zsr_rect_t old_r = window->previous_bounds;
     zsr_rect_t new_r = window->bounds;
     zsr_damage_add(damage, zsr_rect_make(old_r.x - m, old_r.y - m, old_r.width + 2 * m, old_r.height + 2 * m));
@@ -2399,7 +2671,8 @@ static void zsr_compositor_init(
 )
 {
     compositor->backbuffer = backbuffer;
-
+    g_screen_w = backbuffer->width;
+    g_screen_h = backbuffer->height;
     new_app_icons_init();
     zsr_pre_render_wallpaper(backbuffer->width, backbuffer->height);
 
@@ -2419,7 +2692,6 @@ static void zsr_compositor_init(
     compositor->document.node_count = 0;
 }
 
-static bool g_window_open = false; /* Start with an empty, clean desktop! */
 
 void zsr_open_window(zsr_compositor_t *compositor) {
     g_window_open = true;
@@ -2453,8 +2725,11 @@ static void zsr_compositor_build_commands(zsr_compositor_t *compositor)
         zsr_build_zarqaa_window(&compositor->commands, compositor->main_window.bounds, compositor->main_window.dragging);
     }
     
-    // Build the dock on top of everything!
-    zsr_build_desktop_dock(&compositor->commands, compositor->backbuffer->width, compositor->backbuffer->height);
+    if (!zsr_overlay_hidden()) {
+        zsr_build_topbar(&compositor->commands, compositor->backbuffer->width);
+        // Build the dock on top of everything!
+        zsr_build_desktop_dock(&compositor->commands, compositor->backbuffer->width, compositor->backbuffer->height);
+    }
 }
 
 static void zsr_compositor_render_region(
@@ -2497,15 +2772,17 @@ static void zsr_compositor_render_region(
 /* Drive the hosted app's on_tick and turn its redraw requests into damage */
 static void zsr_tick_active_app(zsr_compositor_t *compositor)
 {
-    struct window *win = wm_get_focused();
-    if (!g_window_open || !win || !win->visible || win->minimized) return;
+    zsr_sync_window_to_app(compositor);
+    zsr_tick_topbar(compositor);
+
+    struct window *win = zsr_active_app();
+    if (!win) return;
 
     if (win->on_tick) win->on_tick(win);
-
     if (win->needs_redraw) {
-        zsr_rect_t frame = compositor->main_window.bounds;
-        zsr_damage_add(&compositor->damage,
-                       zsr_rect_make(frame.x, frame.y + ZSR_TITLEBAR_HEIGHT, win->width, win->height));
+        int ox, oy;
+        zsr_content_origin(win, compositor->main_window.bounds, &ox, &oy);
+        zsr_damage_add(&compositor->damage, zsr_rect_make(ox, oy, win->width, win->height));
     }
 }
 
@@ -2578,29 +2855,26 @@ void zsr_render(zsr_compositor_t *compositor)
 
 static bool zsr_hit_test_controls(zsr_compositor_t *compositor, zsr_rect_t frame, int mx, int my)
 {
-    if (!g_window_open) return false;
+    struct window *app = zsr_active_app();
+    if (!app || app->frameless) return false;
 
-    int button_y = frame.y + 22;
-    int min_x = frame.x + frame.width - 108;
-    int red_x = frame.x + frame.width - 80;
-    int yellow_x = frame.x + frame.width - 52;
-    int green_x = frame.x + frame.width - 24;
+    for (int i = 0; i < 3; ++i) {
+        int cx, cy;
+        zsr_ctl_center(frame, i, &cx, &cy);
+        int dx = mx - cx, dy = my - cy;
+        if (dx * dx + dy * dy > 10 * 10) continue;
 
-    if (my >= button_y - 12 && my <= button_y + 12) {
-        if ((mx >= red_x - 10 && mx <= red_x + 10) || (mx >= yellow_x - 10 && mx <= yellow_x + 10)) {
-            struct window *active_win = wm_get_focused();
-            if (active_win && active_win->visible && !active_win->minimized) {
-                wm_destroy_window(active_win);
-            } else {
-                g_window_open = false;
-            }
-            if (compositor) zsr_request_full_redraw(compositor);
-            return true;
+        if (i == 0) {
+            wm_destroy_window(app);
+            wm_focus_top_visible();
+        } else if (i == 1) {
+            app->minimized = true;
+            wm_focus_top_visible();
+        } else {
+            g_force_center = true;
         }
-        if ((mx >= green_x - 10 && mx <= green_x + 10) ||
-            (mx >= min_x - 10 && mx <= min_x + 10)) {
-            return true;
-        }
+        if (compositor) zsr_request_full_redraw(compositor);
+        return true;
     }
     return false;
 }
@@ -2649,7 +2923,7 @@ void zsr_handle_mouse_down(
     }
 
     // Check if dock icon was pressed/dragged
-    if (compositor->backbuffer) {
+    if (compositor->backbuffer && !zsr_overlay_hidden()) {
         int dock_h = 70;
         int dock_w = ZSR_NUM_DOCK * 65 + 40;
         int dock_y = compositor->backbuffer->height - dock_h - 15;
@@ -2753,9 +3027,11 @@ void zsr_handle_mouse_down(
     /* Forward input to active app */
     struct window *active_win = wm_get_focused();
     if (active_win && active_win->visible && !active_win->minimized && !compositor->main_window.dragging) {
-        int app_mx = mouse_x - frame.x;
-        int app_my = mouse_y - frame.y - ZSR_TITLEBAR_HEIGHT;
-        if (app_mx >= 0 && app_mx < frame.width && app_my >= 0 && app_my < frame.height - ZSR_TITLEBAR_HEIGHT) {
+        int cox, coy;
+            zsr_content_origin(active_win, frame, &cox, &coy);
+            int app_mx = mouse_x - cox;
+            int app_my = mouse_y - coy;
+            if (app_mx >= 0 && app_mx < active_win->width && app_my >= 0 && app_my < active_win->height) {
             if (active_win->on_mouse) {
                 active_win->on_mouse(active_win, app_mx, app_my, true, false); // left_down = true, right = false for now
                 active_win->needs_redraw = true;
@@ -2791,6 +3067,17 @@ void zsr_handle_mouse_move(
     zsr_rect_t new_mouse_rect = zsr_rect_make(mouse_x, mouse_y, 16, 24);
     g_old_mouse_rect = new_mouse_rect;
     zsr_damage_add(&compositor->damage, new_mouse_rect);
+
+    {
+        static bool ctl_hover = false;
+        zsr_rect_t f = compositor->main_window.bounds;
+        struct window *a = zsr_active_app();
+        bool h = a && !a->frameless && zsr_controls_hover(f);
+        if (h != ctl_hover) {
+            ctl_hover = h;
+            zsr_damage_add(&compositor->damage, zsr_rect_make(f.x, f.y, 110, ZSR_TITLEBAR_HEIGHT));
+        }
+    }
 
     // Handle Dock Icon Drag & Reordering
     if (g_drag_dock_index != -1 && compositor->backbuffer) {
@@ -2862,9 +3149,11 @@ void zsr_handle_mouse_move(
         struct window *active_win = wm_get_focused();
         zsr_rect_t frame = compositor->main_window.bounds;
         if (active_win && active_win->visible && !active_win->minimized && !compositor->main_window.dragging) {
-            int app_mx = mouse_x - frame.x;
-            int app_my = mouse_y - frame.y - ZSR_TITLEBAR_HEIGHT;
-            if (app_mx >= 0 && app_mx < frame.width && app_my >= 0 && app_my < frame.height - ZSR_TITLEBAR_HEIGHT) {
+            int cox, coy;
+            zsr_content_origin(active_win, frame, &cox, &coy);
+            int app_mx = mouse_x - cox;
+            int app_my = mouse_y - coy;
+            if (app_mx >= 0 && app_mx < active_win->width && app_my >= 0 && app_my < active_win->height) {
                 if (active_win->on_mouse) {
                     active_win->on_mouse(active_win, app_mx, app_my, false, false); // Not clicking, just moving
                 }
@@ -2917,9 +3206,11 @@ void zsr_handle_mouse_up(zsr_compositor_t *compositor)
         struct window *active_win = wm_get_focused();
         zsr_rect_t frame = compositor->main_window.bounds;
         if (active_win && active_win->visible && !active_win->minimized) {
-            int app_mx = g_mouse_x - frame.x;
-            int app_my = g_mouse_y - frame.y - ZSR_TITLEBAR_HEIGHT;
-            if (app_mx >= 0 && app_mx < frame.width && app_my >= 0 && app_my < frame.height - ZSR_TITLEBAR_HEIGHT) {
+            int cox, coy;
+            zsr_content_origin(active_win, frame, &cox, &coy);
+            int app_mx = g_mouse_x - cox;
+            int app_my = g_mouse_y - coy;
+            if (app_mx >= 0 && app_mx < active_win->width && app_my >= 0 && app_my < active_win->height) {
                 if (active_win->on_mouse) {
                     /* Call with left_down = false */
                     active_win->on_mouse(active_win, app_mx, app_my, false, false);

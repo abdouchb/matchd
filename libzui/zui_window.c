@@ -13,13 +13,12 @@
 static void zui_window_draw(zui_widget_t *base, int abs_x, int abs_y) {
     zui_window_t *win = (zui_window_t *)base;
     
-    // Draw window background (glass effect)
+    /* Hosted inside a compositor window that already has chrome: only draw our own
+     * frame when a title was requested. */
+    if (win->title[0] == '\0') return;
+
     gfx_draw_glass_panel(abs_x, abs_y, base->width, base->height, 12, 0xFF0A1520, 0xFF1A3550, 200);
-    
-    // Draw titlebar area
     gfx_draw_rounded_rect_filled(abs_x, abs_y, base->width, 30, 12, 0xFF050D14);
-    
-    // Title text
     fb_draw_string_transparent(abs_x + 15, abs_y + 7, win->title, 0xFFFFFFFF);
 }
 
